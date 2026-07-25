@@ -69,7 +69,7 @@ type modelInfo struct {
 	OutputPriceFlex      float64 `yaml:"output_price_flex,omitempty"`
 	CachedInputPriceFlex float64 `yaml:"cached_input_price_flex,omitempty"`
 
-	// 长上下文阶梯（仅 gpt-5.4 家族）
+	// 长上下文阶梯（仅 gpt-5.6 家族）
 	LongContextThreshold        int     `yaml:"long_context_threshold,omitempty"`
 	LongContextInputMultiplier  float64 `yaml:"long_context_input_multiplier,omitempty"`
 	LongContextOutputMultiplier float64 `yaml:"long_context_output_multiplier,omitempty"`

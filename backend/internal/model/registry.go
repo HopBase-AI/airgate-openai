@@ -21,7 +21,7 @@ import (
 //   - 标准档：Input / Cached / Output
 //   - Priority 档：*Priority 字段（通常标准 × 2；gpt-5.5 为 × 2.5），缺省时 SDK 以 × 2 兜底
 //   - Flex / Batch 档：*Flex 字段（= 标准 × 0.5），缺省时 SDK 以 × 0.5 兜底
-//   - 长上下文档（gpt-5.4 / gpt-5.6 家族）：完整 input_tokens 超过 LongContextThreshold
+//   - 长上下文档（仅 gpt-5.6 家族）：完整 input_tokens 超过 LongContextThreshold
 //     时，整次请求全量按倍率计费
 type Spec struct {
 	Name            string
@@ -52,7 +52,7 @@ type Spec struct {
 	CachedPriceFlex float64
 	OutputPriceFlex float64
 
-	// 长上下文阶梯（只对 gpt-5.4 / gpt-5.6 家族填非零值）。
+	// 长上下文阶梯（只对 gpt-5.6 家族填非零值）。
 	LongContextThreshold        int
 	LongContextInputMultiplier  float64
 	LongContextOutputMultiplier float64
@@ -98,7 +98,7 @@ func imgSpec(name string) Spec {
 	return pricedImageSpec(name, 5.0, 0.5, 30.0)
 }
 
-// withLongCtx 在已构造的 Spec 基础上附加长上下文阶梯（gpt-5.4 / gpt-5.6 家族）。
+// withLongCtx 在已构造的 Spec 基础上附加 GPT-5.6 长上下文阶梯。
 // OpenAI 官方：input ×2、cached ×2、output ×1.5，阈值 272k input_tokens。
 func withLongCtx(s Spec) Spec {
 	s.LongContextThreshold = 272_000
@@ -119,16 +119,14 @@ func withLongCtx(s Spec) Spec {
 var registry = map[string]Spec{
 	// ── GPT-5.6 家族(2026-07-09 GA):三档同为 1.05M 上下文,>272K 输入整笔 ×2 in / ×1.5 out ──
 	// 官方价 2026-07-11 核实:Sol $5/$30、Terra $2.5/$15、Luna $1/$6,缓存读=输入×10%。
-	// 裸名 gpt-5.6 是 Sol 的官方别名,同价注册,避免走关键字兜底。
 	"gpt-5.6-sol":   withLongCtx(std("GPT 5.6 Sol", 1050000, 128000, 5.0, 0.5, 30.0)),
-	"gpt-5.6":       withLongCtx(std("GPT 5.6", 1050000, 128000, 5.0, 0.5, 30.0)),
 	"gpt-5.6-terra": withLongCtx(std("GPT 5.6 Terra", 1050000, 128000, 2.5, 0.25, 15.0)),
 	"gpt-5.6-luna":  withLongCtx(std("GPT 5.6 Luna", 1050000, 128000, 1.0, 0.1, 6.0)),
 
 	"gpt-5.5": withPriorityMultiplier(std("GPT 5.5", 400000, 128000, 5.0, 0.5, 30.0), 2.5),
 
 	// ── GPT-5.4 ──
-	"gpt-5.4": withLongCtx(std("GPT 5.4", 272000, 128000, 2.5, 0.25, 15.0)),
+	"gpt-5.4": std("GPT 5.4", 272000, 128000, 2.5, 0.25, 15.0),
 
 	// ── Codex / GPT 轻量系列 ──
 	"gpt-5.3-codex-spark": std("GPT 5.3 Codex Spark", 128000, 128000, 1.75, 0.175, 14.0),
@@ -156,7 +154,7 @@ var registry = map[string]Spec{
 
 // DefaultSpec 未注册模型的最终兜底值。按 gpt-5.4 标准档计价——宁可略高也不能 0。
 // （0 价格会导致免费流量，之前一个 bug 来源。）
-var DefaultSpec = withLongCtx(std("Unknown (billed as gpt-5.4)", 272000, 128000, 2.5, 0.25, 15.0))
+var DefaultSpec = std("Unknown (billed as gpt-5.4)", 272000, 128000, 2.5, 0.25, 15.0)
 
 // Lookup 查询模型元数据。未命中注册表时按关键字推断到最接近的系列，仍无法匹配再落 DefaultSpec。
 //

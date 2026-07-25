@@ -156,14 +156,14 @@ func TestCatalogOverlay_NonGPTNewModelHasNoLongContextTier(t *testing.T) {
 	}
 }
 
-// TestCatalogOverlay_GPTNewModelKeepsLongContextTier 匹配到 GPT 系列的新模型仍应继承 272K 阶梯。
-func TestCatalogOverlay_GPTNewModelKeepsLongContextTier(t *testing.T) {
+// TestCatalogOverlay_GPTNewModelDoesNotInventLongContextTier 未注册的新 GPT 型号不能继承 5.6 阶梯。
+func TestCatalogOverlay_GPTNewModelDoesNotInventLongContextTier(t *testing.T) {
 	withCatalogOverlay(t, `[
 	  {"id":"gpt-5.7-nova","name":"GPT 5.7 Nova","pricing":{"input":1,"output":6}}
 	]`)
 	spec := Lookup("gpt-5.7-nova")
-	if spec.LongContextThreshold != 272000 {
-		t.Fatalf("匹配 GPT 系列的新模型应保留 272K 阶梯, got %d", spec.LongContextThreshold)
+	if spec.LongContextThreshold != 0 {
+		t.Fatalf("非 5.6 三规格模型不应带 272K 阶梯, got %d", spec.LongContextThreshold)
 	}
 }
 
@@ -330,7 +330,7 @@ func TestCatalogOverlay_NewModelWithoutStandardKeepsInferred(t *testing.T) {
 	}
 }
 
-// TestBuiltinGPT56Family 5.6 三档 + 裸名别名的内置价格护栏(2026-07-11 官方 GA 价)。
+// TestBuiltinGPT56Family 锁定 5.6 三档的内置价格与长上下文规则。
 func TestBuiltinGPT56Family(t *testing.T) {
 	ResetCatalogOverlay()
 	cases := []struct {
@@ -338,7 +338,6 @@ func TestBuiltinGPT56Family(t *testing.T) {
 		input, cached, output float64
 	}{
 		{"gpt-5.6-sol", 5, 0.5, 30},
-		{"gpt-5.6", 5, 0.5, 30}, // 官方裸名别名 = Sol 价
 		{"gpt-5.6-terra", 2.5, 0.25, 15},
 		{"gpt-5.6-luna", 1, 0.1, 6},
 	}
@@ -361,6 +360,12 @@ func TestBuiltinGPT56Family(t *testing.T) {
 		if spec.ContextWindow != 1050000 || spec.MaxOutputTokens != 128000 {
 			t.Errorf("%s 上下文规格错误: %d/%d", c.id, spec.ContextWindow, spec.MaxOutputTokens)
 		}
+	}
+	if spec := registry["gpt-5.4"]; spec.LongContextThreshold != 0 {
+		t.Fatalf("gpt-5.4 不应启用 272K 长上下文阶梯: %+v", spec)
+	}
+	if _, ok := registry["gpt-5.6"]; ok {
+		t.Fatal("不得注册裸 gpt-5.6；只允许 luna / sol / terra 三个规格")
 	}
 }
 
