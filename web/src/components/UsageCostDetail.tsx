@@ -109,7 +109,7 @@ function contextArray<T>(context: UsageRecordSurfaceProps['context'], camel: str
 
 function recordFromContext(context: UsageRecordSurfaceProps['context']): UsageRecordLike {
   const record = context?.record;
-  return record && typeof record === 'object' ? record as UsageRecordLike : {};
+  return record && typeof record === 'object' ? record : {};
 }
 
 function money(value: unknown) {

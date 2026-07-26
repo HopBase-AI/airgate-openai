@@ -209,7 +209,7 @@ export function AccountForm({
   const [oauthLoading, setOAuthLoading] = useState(false);
   const [oauthStatus, setOAuthStatus] = useState<{ type: 'info' | 'success' | 'error'; text: string } | null>(null);
   const accountType = (propType as AccountType | undefined) ?? localType;
-  const oauthExt = oauth as OAuthBridgeWithSession | undefined;
+  const oauthExt: OAuthBridgeWithSession | undefined = oauth;
 
   // 进入/退出批量模式时通知外层隐藏"下一步/创建"按钮
   const isBatchActive =
