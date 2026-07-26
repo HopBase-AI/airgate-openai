@@ -377,16 +377,17 @@ func TestBuiltinGeminiImagePricing(t *testing.T) {
 		id                    string
 		input, cached, output float64
 	}{
+		// output = Google 官方**图像输出价**(非文本输出价);见 registry.go 注释。
 		{"gemini-2.5-flash-image", 0.3, 0.03, 30},
-		{"gemini-3-pro-image", 2, 0.2, 12},
-		{"gemini-3-pro-image-c", 2, 0.2, 12},
-		{"gemini-3-pro-image-preview", 2, 0.2, 12},
-		{"gemini-3-pro-image-preview-c", 2, 0.2, 12},
-		{"gemini-3.1-flash-image", 0.5, 0.05, 3},
-		{"gemini-3.1-flash-image-c", 0.5, 0.05, 3},
-		{"gemini-3.1-flash-image-preview", 0.5, 0.05, 3},
-		{"gemini-3.1-flash-image-preview-c", 0.5, 0.05, 3},
-		{"gemini-3.1-flash-lite-image", 0.25, 0.025, 1.5},
+		{"gemini-3-pro-image", 2, 0.2, 120},
+		{"gemini-3-pro-image-c", 2, 0.2, 120},
+		{"gemini-3-pro-image-preview", 2, 0.2, 120},
+		{"gemini-3-pro-image-preview-c", 2, 0.2, 120},
+		{"gemini-3.1-flash-image", 0.5, 0.05, 60},
+		{"gemini-3.1-flash-image-c", 0.5, 0.05, 60},
+		{"gemini-3.1-flash-image-preview", 0.5, 0.05, 60},
+		{"gemini-3.1-flash-image-preview-c", 0.5, 0.05, 60},
+		{"gemini-3.1-flash-lite-image", 0.25, 0.025, 30},
 	}
 	for _, c := range cases {
 		t.Run(c.id, func(t *testing.T) {

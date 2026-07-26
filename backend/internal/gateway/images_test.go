@@ -419,19 +419,20 @@ func TestFillUsageCostPerImageBySize_1K(t *testing.T) {
 
 // TestFillUsageCostPerImageBySize_GeminiUsesDedicatedPrice 复现生产曾出现的
 // Azure Gemini 生图错扣：198 input + 1571 image output 不应回退到 GPT-5.5 价。
+// 输出按 Google 官方**图像输出价** $60/1M 计（不是文本输出价 $3/1M）。
 func TestFillUsageCostPerImageBySize_GeminiUsesDedicatedPrice(t *testing.T) {
 	const modelID = "gemini-3.1-flash-image-preview"
 	usage := newTokenUsage(modelID, "", 198, 1571, 0, 0, 0)
 	fillUsageCostPerImageBySize(usage, 1, "1264x848", "")
 
-	want := tokenCost(198, 0.5) + tokenCost(1571, 3)
+	want := tokenCost(198, 0.5) + tokenCost(1571, 60)
 	if !almostEqual(usage.AccountCost, want, 1e-12) {
 		t.Fatalf("AccountCost = %v, want %v", usage.AccountCost, want)
 	}
 	if got, wantModel := usageCostMetadata(usage, usageCostImage, "billing_model"), modelID; got != wantModel {
 		t.Fatalf("image billing_model = %q, want %q", got, wantModel)
 	}
-	if got, wantPrice := usageImageUnitPrice(usage), "3"; got != wantPrice {
+	if got, wantPrice := usageImageUnitPrice(usage), "60"; got != wantPrice {
 		t.Fatalf("image unit_price = %q, want %q", got, wantPrice)
 	}
 }

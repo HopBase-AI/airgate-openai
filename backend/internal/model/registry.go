@@ -140,16 +140,25 @@ var registry = map[string]Spec{
 	// ── OpenAI-compatible Gemini image relays（Nano Banana 系列）──
 	// Azure Gemini 分组使用同一组官方模型基准价，再由 Core 套分组倍率。
 	// -c 是协议变体，与对应非 -c 型号同价。
+	// ⚠️ output 必须填 Google 的**图像输出价**($120/$60/$30),不是文本输出价
+	// ($12/$3/$1.5)——生图请求的输出 tokens 走 prices.output 计费(见 outcome.go
+	// addUsageCostForModel)。2026-07-26 前误填文本价,生产少收 10–20 倍。
+	// 官方依据(直读):https://ai.google.dev/gemini-api/docs/pricing
+	//   3 Pro Image  $120/1M(1120 tok/张 = $0.134/张)
+	//   3.1 Flash    $60/1M (1120 tok/张 = $0.067/张)
+	//   3.1 Lite     $30/1M (1120 tok/张 = $0.0336/张)
+	//   2.5 Flash    $30/1M (1290 tok/张 = $0.039/张)
+	// cached 价 Google 未发布(这些模型无 context caching 行),沿用输入价 10% 惯例。
 	"gemini-2.5-flash-image":           pricedImageSpec("Gemini 2.5 Flash Image", 0.3, 0.03, 30.0),
-	"gemini-3-pro-image":               pricedImageSpec("Gemini 3 Pro Image", 2.0, 0.2, 12.0),
-	"gemini-3-pro-image-c":             pricedImageSpec("Gemini 3 Pro Image C", 2.0, 0.2, 12.0),
-	"gemini-3-pro-image-preview":       pricedImageSpec("Gemini 3 Pro Image Preview", 2.0, 0.2, 12.0),
-	"gemini-3-pro-image-preview-c":     pricedImageSpec("Gemini 3 Pro Image Preview C", 2.0, 0.2, 12.0),
-	"gemini-3.1-flash-image":           pricedImageSpec("Gemini 3.1 Flash Image", 0.5, 0.05, 3.0),
-	"gemini-3.1-flash-image-c":         pricedImageSpec("Gemini 3.1 Flash Image C", 0.5, 0.05, 3.0),
-	"gemini-3.1-flash-image-preview":   pricedImageSpec("Gemini 3.1 Flash Image Preview", 0.5, 0.05, 3.0),
-	"gemini-3.1-flash-image-preview-c": pricedImageSpec("Gemini 3.1 Flash Image Preview C", 0.5, 0.05, 3.0),
-	"gemini-3.1-flash-lite-image":      pricedImageSpec("Gemini 3.1 Flash Lite Image", 0.25, 0.025, 1.5),
+	"gemini-3-pro-image":               pricedImageSpec("Gemini 3 Pro Image", 2.0, 0.2, 120.0),
+	"gemini-3-pro-image-c":             pricedImageSpec("Gemini 3 Pro Image C", 2.0, 0.2, 120.0),
+	"gemini-3-pro-image-preview":       pricedImageSpec("Gemini 3 Pro Image Preview", 2.0, 0.2, 120.0),
+	"gemini-3-pro-image-preview-c":     pricedImageSpec("Gemini 3 Pro Image Preview C", 2.0, 0.2, 120.0),
+	"gemini-3.1-flash-image":           pricedImageSpec("Gemini 3.1 Flash Image", 0.5, 0.05, 60.0),
+	"gemini-3.1-flash-image-c":         pricedImageSpec("Gemini 3.1 Flash Image C", 0.5, 0.05, 60.0),
+	"gemini-3.1-flash-image-preview":   pricedImageSpec("Gemini 3.1 Flash Image Preview", 0.5, 0.05, 60.0),
+	"gemini-3.1-flash-image-preview-c": pricedImageSpec("Gemini 3.1 Flash Image Preview C", 0.5, 0.05, 60.0),
+	"gemini-3.1-flash-lite-image":      pricedImageSpec("Gemini 3.1 Flash Lite Image", 0.25, 0.025, 30.0),
 }
 
 // DefaultSpec 未注册模型的最终兜底值。按 gpt-5.4 标准档计价——宁可略高也不能 0。

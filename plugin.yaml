@@ -114,13 +114,13 @@ gateway:
       capabilities:
         - image_generation
       input_price: 2
-      output_price: 12
+      output_price: 120
       cached_input_price: 0.2
       input_price_priority: 4
-      output_price_priority: 24
+      output_price_priority: 240
       cached_input_price_priority: 0.4
       input_price_flex: 1
-      output_price_flex: 6
+      output_price_flex: 60
       cached_input_price_flex: 0.1
     - id: gemini-3-pro-image-c
       name: Gemini 3 Pro Image C
@@ -129,13 +129,13 @@ gateway:
       capabilities:
         - image_generation
       input_price: 2
-      output_price: 12
+      output_price: 120
       cached_input_price: 0.2
       input_price_priority: 4
-      output_price_priority: 24
+      output_price_priority: 240
       cached_input_price_priority: 0.4
       input_price_flex: 1
-      output_price_flex: 6
+      output_price_flex: 60
       cached_input_price_flex: 0.1
     - id: gemini-3-pro-image-preview
       name: Gemini 3 Pro Image Preview
@@ -144,13 +144,13 @@ gateway:
       capabilities:
         - image_generation
       input_price: 2
-      output_price: 12
+      output_price: 120
       cached_input_price: 0.2
       input_price_priority: 4
-      output_price_priority: 24
+      output_price_priority: 240
       cached_input_price_priority: 0.4
       input_price_flex: 1
-      output_price_flex: 6
+      output_price_flex: 60
       cached_input_price_flex: 0.1
     - id: gemini-3-pro-image-preview-c
       name: Gemini 3 Pro Image Preview C
@@ -159,13 +159,13 @@ gateway:
       capabilities:
         - image_generation
       input_price: 2
-      output_price: 12
+      output_price: 120
       cached_input_price: 0.2
       input_price_priority: 4
-      output_price_priority: 24
+      output_price_priority: 240
       cached_input_price_priority: 0.4
       input_price_flex: 1
-      output_price_flex: 6
+      output_price_flex: 60
       cached_input_price_flex: 0.1
     - id: gemini-3.1-flash-image
       name: Gemini 3.1 Flash Image
@@ -174,13 +174,13 @@ gateway:
       capabilities:
         - image_generation
       input_price: 0.5
-      output_price: 3
+      output_price: 60
       cached_input_price: 0.05
       input_price_priority: 1
-      output_price_priority: 6
+      output_price_priority: 120
       cached_input_price_priority: 0.1
       input_price_flex: 0.25
-      output_price_flex: 1.5
+      output_price_flex: 30
       cached_input_price_flex: 0.025
     - id: gemini-3.1-flash-image-c
       name: Gemini 3.1 Flash Image C
@@ -189,13 +189,13 @@ gateway:
       capabilities:
         - image_generation
       input_price: 0.5
-      output_price: 3
+      output_price: 60
       cached_input_price: 0.05
       input_price_priority: 1
-      output_price_priority: 6
+      output_price_priority: 120
       cached_input_price_priority: 0.1
       input_price_flex: 0.25
-      output_price_flex: 1.5
+      output_price_flex: 30
       cached_input_price_flex: 0.025
     - id: gemini-3.1-flash-image-preview
       name: Gemini 3.1 Flash Image Preview
@@ -204,13 +204,13 @@ gateway:
       capabilities:
         - image_generation
       input_price: 0.5
-      output_price: 3
+      output_price: 60
       cached_input_price: 0.05
       input_price_priority: 1
-      output_price_priority: 6
+      output_price_priority: 120
       cached_input_price_priority: 0.1
       input_price_flex: 0.25
-      output_price_flex: 1.5
+      output_price_flex: 30
       cached_input_price_flex: 0.025
     - id: gemini-3.1-flash-image-preview-c
       name: Gemini 3.1 Flash Image Preview C
@@ -219,13 +219,13 @@ gateway:
       capabilities:
         - image_generation
       input_price: 0.5
-      output_price: 3
+      output_price: 60
       cached_input_price: 0.05
       input_price_priority: 1
-      output_price_priority: 6
+      output_price_priority: 120
       cached_input_price_priority: 0.1
       input_price_flex: 0.25
-      output_price_flex: 1.5
+      output_price_flex: 30
       cached_input_price_flex: 0.025
     - id: gemini-3.1-flash-lite-image
       name: Gemini 3.1 Flash Lite Image
@@ -234,13 +234,13 @@ gateway:
       capabilities:
         - image_generation
       input_price: 0.25
-      output_price: 1.5
+      output_price: 30
       cached_input_price: 0.025
       input_price_priority: 0.5
-      output_price_priority: 3
+      output_price_priority: 60
       cached_input_price_priority: 0.05
       input_price_flex: 0.125
-      output_price_flex: 0.75
+      output_price_flex: 15
       cached_input_price_flex: 0.0125
     - id: gpt-5.3-codex-spark
       name: GPT 5.3 Codex Spark
