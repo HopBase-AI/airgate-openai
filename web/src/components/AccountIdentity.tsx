@@ -8,7 +8,7 @@ type AccountLike = {
 
 function readAccount(context: AccountSurfaceProps['context']): AccountLike {
   const account = context?.account;
-  if (account && typeof account === 'object') return account as AccountLike;
+  if (account && typeof account === 'object') return account;
   return {};
 }
 
