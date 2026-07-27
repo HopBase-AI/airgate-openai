@@ -190,6 +190,14 @@ func buildAPIKeyURL(account *sdk.Account, reqPath string) string {
 // 请求预处理
 // ──────────────────────────────────────────────────────
 
+// upstreamModelID keeps public plan aliases out of the provider request body.
+func upstreamModelID(requestModel string) string {
+	if strings.EqualFold(strings.TrimSpace(requestModel), "glm-5.2-fp8") {
+		return "glm-5.2"
+	}
+	return requestModel
+}
+
 // preprocessRequestBody 统一预处理请求体。
 //
 // 在 forwardHTTP 入口调用，保证 API Key / OAuth / Anthropic 等所有路径
@@ -214,7 +222,7 @@ func preprocessRequestBody(body []byte, model, reqPath string) []byte {
 	}
 
 	result := body
-	if model != "" {
+	if model = upstreamModelID(model); model != "" {
 		bodyModel := gjson.GetBytes(result, "model").String()
 		if bodyModel != model {
 			if modified, err := sjson.SetBytes(result, "model", model); err == nil {

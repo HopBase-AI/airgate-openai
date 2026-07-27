@@ -211,6 +211,16 @@ func TestPreprocessRequestBody_PreservesConversationImageDataURLs(t *testing.T) 
 	}
 }
 
+func TestPreprocessRequestBodyMapsGLMFP8AliasForUpstream(t *testing.T) {
+	body := []byte(`{"model":"glm-5.2-fp8","messages":[{"role":"user","content":"hi"}],"stream":true}`)
+
+	got := preprocessRequestBody(body, "glm-5.2-fp8", "/v1/chat/completions")
+
+	if model := gjson.GetBytes(got, "model").String(); model != "glm-5.2" {
+		t.Fatalf("upstream model = %q, want glm-5.2; body=%s", model, got)
+	}
+}
+
 func largeConversationImageDataURL(t *testing.T) string {
 	t.Helper()
 	img := image.NewRGBA(image.Rect(0, 0, 1024, 1024))

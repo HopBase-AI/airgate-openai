@@ -283,8 +283,8 @@ func TestHandleStreamResponseTreatsReasoningContentAsOutput(t *testing.T) {
 		t.Fatalf("expected OutcomeSuccess, got %v", outcome.Kind)
 	}
 	got := w.Body.String()
-	if !strings.Contains(got, `"reasoning_content":"The answer is 42."`) || !strings.Contains(got, "data: [DONE]") {
-		t.Fatalf("reasoning-only stream was not forwarded completely: %q", got)
+	if got != body {
+		t.Fatalf("reasoning-only stream should be forwarded unchanged:\n got: %q\nwant: %q", got, body)
 	}
 }
 
