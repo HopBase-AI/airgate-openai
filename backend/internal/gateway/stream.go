@@ -768,7 +768,10 @@ func streamChatChoicesHaveOutput(data string) bool {
 	}
 	for _, choice := range choices.Array() {
 		delta := choice.Get("delta")
-		if strings.TrimSpace(delta.Get("content").String()) != "" {
+		if strings.TrimSpace(firstNonEmptyString(
+			delta.Get("content").String(),
+			delta.Get("reasoning_content").String(),
+		)) != "" {
 			return true
 		}
 		if toolCalls := delta.Get("tool_calls"); toolCalls.Exists() && len(toolCalls.Array()) > 0 {
@@ -778,7 +781,10 @@ func streamChatChoicesHaveOutput(data string) bool {
 			return true
 		}
 		message := choice.Get("message")
-		if strings.TrimSpace(message.Get("content").String()) != "" {
+		if strings.TrimSpace(firstNonEmptyString(
+			message.Get("content").String(),
+			message.Get("reasoning_content").String(),
+		)) != "" {
 			return true
 		}
 		if message.Get("tool_calls").Exists() || message.Get("function_call").Exists() {

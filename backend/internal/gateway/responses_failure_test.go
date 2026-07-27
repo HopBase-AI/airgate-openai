@@ -257,6 +257,69 @@ func TestHandleStreamResponseFlushesBufferedPreludeWhenOutputArrives(t *testing.
 	}
 }
 
+func TestHandleStreamResponseTreatsReasoningContentAsOutput(t *testing.T) {
+	body := strings.Join([]string{
+		`data: {"id":"chatcmpl_test","choices":[{"delta":{"role":"assistant"},"finish_reason":null}]}`,
+		"",
+		`data: {"id":"chatcmpl_test","choices":[{"delta":{"content":"","reasoning_content":"The answer is 42."},"finish_reason":null}]}`,
+		"",
+		`data: {"id":"chatcmpl_test","choices":[{"delta":{},"finish_reason":"stop"}]}`,
+		"",
+		"data: [DONE]",
+		"",
+	}, "\n")
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       io.NopCloser(strings.NewReader(body)),
+	}
+	w := httptest.NewRecorder()
+
+	outcome, err := handleStreamResponse(resp, w, time.Now(), "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if outcome.Kind != sdk.OutcomeSuccess {
+		t.Fatalf("expected OutcomeSuccess, got %v", outcome.Kind)
+	}
+	got := w.Body.String()
+	if got != body {
+		t.Fatalf("reasoning-only stream should be forwarded unchanged:\n got: %q\nwant: %q", got, body)
+	}
+}
+
+func TestStreamChatChoicesHaveOutputRecognizesReasoningContent(t *testing.T) {
+	tests := []struct {
+		name string
+		data string
+		want bool
+	}{
+		{
+			name: "delta",
+			data: `{"choices":[{"delta":{"content":"","reasoning_content":"answer"}}]}`,
+			want: true,
+		},
+		{
+			name: "message",
+			data: `{"choices":[{"message":{"content":"","reasoning_content":"answer"}}]}`,
+			want: true,
+		},
+		{
+			name: "empty reasoning",
+			data: `{"choices":[{"delta":{"content":"","reasoning_content":"  "}}]}`,
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := streamChatChoicesHaveOutput(tt.data); got != tt.want {
+				t.Fatalf("streamChatChoicesHaveOutput() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestHandleStreamResponseTreatsResponsesImageContentAsOutput(t *testing.T) {
 	body := strings.Join([]string{
 		`event: response.created`,
