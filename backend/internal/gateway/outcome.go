@@ -660,3 +660,28 @@ func imageTierForSize(size string) string {
 		return "4k"
 	}
 }
+
+// imageUpstreamModelID maps the public GPT Image 2 alias to the resolution-
+// specific model IDs used by Images API relay providers. Other image models
+// and already-specific IDs pass through unchanged.
+func imageUpstreamModelID(modelID, size string) string {
+	modelID = strings.TrimSpace(modelID)
+	if !strings.EqualFold(modelID, "gpt-image-2") {
+		return modelID
+	}
+	return "gpt-image-2-" + imageTierForSize(size)
+}
+
+func imagePublicModelID(responseModel, fallbackModel string) string {
+	responseModel = strings.TrimSpace(responseModel)
+	fallbackModel = strings.TrimSpace(fallbackModel)
+	if !strings.EqualFold(fallbackModel, "gpt-image-2") {
+		return responseModel
+	}
+	switch strings.ToLower(responseModel) {
+	case "gpt-image-2-1k", "gpt-image-2-2k", "gpt-image-2-4k":
+		return "gpt-image-2"
+	default:
+		return responseModel
+	}
+}

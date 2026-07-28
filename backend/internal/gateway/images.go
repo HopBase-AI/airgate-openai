@@ -275,6 +275,85 @@ func buildAPIKeyImagesEditMultipartBody(body []byte, contentType string) ([]byte
 	return buf.Bytes(), mw.FormDataContentType(), nil
 }
 
+// rewriteImagesRequestModel updates only the model field while preserving the
+// client's JSON or multipart Images API payload. GPT Image 2 uses this just
+// before API-key passthrough because compatible upstreams expose one model ID
+// per output tier (for example, gpt-image-2-2k).
+func rewriteImagesRequestModel(body []byte, contentType, upstreamModel string) ([]byte, string, error) {
+	upstreamModel = strings.TrimSpace(upstreamModel)
+	if upstreamModel == "" || len(body) == 0 {
+		return body, contentType, nil
+	}
+
+	if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(contentType)), "multipart/") {
+		patched, patchErr := sjsonSetBytes(body, "model", upstreamModel)
+		if patchErr != nil {
+			return nil, "", fmt.Errorf("改写上游图片模型失败: %w", patchErr)
+		}
+		return patched, contentType, nil
+	}
+	mediaType, params, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		return nil, "", fmt.Errorf("multipart content-type 解析失败: %w", err)
+	}
+	if !strings.EqualFold(mediaType, "multipart/form-data") {
+		return nil, "", fmt.Errorf("不支持的 multipart content-type: %s", mediaType)
+	}
+
+	boundary := params["boundary"]
+	if boundary == "" {
+		return nil, "", fmt.Errorf("multipart content-type 缺少 boundary")
+	}
+
+	reader := multipart.NewReader(bytes.NewReader(body), boundary)
+	var buf bytes.Buffer
+	writer := multipart.NewWriter(&buf)
+	if err := writer.SetBoundary(boundary); err != nil {
+		return nil, "", fmt.Errorf("multipart boundary 无效: %w", err)
+	}
+
+	foundModel := false
+	for {
+		part, nextErr := reader.NextPart()
+		if nextErr == io.EOF {
+			break
+		}
+		if nextErr != nil {
+			return nil, "", fmt.Errorf("multipart 读取失败: %w", nextErr)
+		}
+
+		header := make(textproto.MIMEHeader, len(part.Header))
+		for key, values := range part.Header {
+			header[key] = append([]string(nil), values...)
+		}
+		data, readErr := io.ReadAll(part)
+		_ = part.Close()
+		if readErr != nil {
+			return nil, "", fmt.Errorf("multipart part %q 读取失败: %w", part.FormName(), readErr)
+		}
+		if part.FormName() == "model" {
+			data = []byte(upstreamModel)
+			foundModel = true
+		}
+		dst, createErr := writer.CreatePart(header)
+		if createErr != nil {
+			return nil, "", fmt.Errorf("multipart part %q 重建失败: %w", part.FormName(), createErr)
+		}
+		if _, writeErr := dst.Write(data); writeErr != nil {
+			return nil, "", fmt.Errorf("multipart part %q 写入失败: %w", part.FormName(), writeErr)
+		}
+	}
+	if !foundModel {
+		if err := writer.WriteField("model", upstreamModel); err != nil {
+			return nil, "", fmt.Errorf("multipart model 写入失败: %w", err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		return nil, "", fmt.Errorf("multipart 请求结束失败: %w", err)
+	}
+	return buf.Bytes(), contentType, nil
+}
+
 func writeMultipartImageBytes(mw *multipart.Writer, fieldName, baseName, mimeType string, data []byte) error {
 	ext := ".png"
 	switch mimeType {
@@ -1631,6 +1710,7 @@ func handleImagesResponseWithLogger(logger *slog.Logger, resp *http.Response, w 
 	if modelName == "" {
 		modelName = fallbackModel
 	}
+	modelName = imagePublicModelID(modelName, fallbackModel)
 
 	numImages := countUsableImages(body)
 	if logger == nil {

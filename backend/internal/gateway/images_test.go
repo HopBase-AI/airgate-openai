@@ -485,6 +485,86 @@ func TestImageTierForSize(t *testing.T) {
 	}
 }
 
+func TestImageUpstreamModelID(t *testing.T) {
+	tests := []struct {
+		name  string
+		model string
+		size  string
+		want  string
+	}{
+		{name: "default 1k", model: "gpt-image-2", size: "auto", want: "gpt-image-2-1k"},
+		{name: "landscape 1k", model: "gpt-image-2", size: "1536x1024", want: "gpt-image-2-1k"},
+		{name: "portrait 2k", model: "gpt-image-2", size: "1536x2048", want: "gpt-image-2-2k"},
+		{name: "ultrawide 4k", model: "gpt-image-2", size: "3360x1440", want: "gpt-image-2-4k"},
+		{name: "case insensitive alias", model: " GPT-IMAGE-2 ", size: "2048x1152", want: "gpt-image-2-2k"},
+		{name: "other model unchanged", model: "gpt-image-1.5", size: "3840x2160", want: "gpt-image-1.5"},
+		{name: "specific model unchanged", model: "gpt-image-2-4k", size: "1024x1024", want: "gpt-image-2-4k"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := imageUpstreamModelID(tt.model, tt.size); got != tt.want {
+				t.Fatalf("imageUpstreamModelID(%q, %q) = %q, want %q", tt.model, tt.size, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRewriteImagesRequestModelMultipartPreservesPayload(t *testing.T) {
+	var original bytes.Buffer
+	writer := multipart.NewWriter(&original)
+	if err := writer.WriteField("model", "gpt-image-2"); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.WriteField("prompt", "relight the product"); err != nil {
+		t.Fatal(err)
+	}
+	imageBytes := []byte{0x89, 0x50, 0x4e, 0x47, 0x01, 0x02}
+	imageHeader := make(textproto.MIMEHeader)
+	imageHeader.Set("Content-Disposition", `form-data; name="image"; filename="input.png"`)
+	imageHeader.Set("Content-Type", "image/png")
+	part, err := writer.CreatePart(imageHeader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := part.Write(imageBytes); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	contentType := writer.FormDataContentType()
+	patched, patchedContentType, err := rewriteImagesRequestModel(
+		original.Bytes(),
+		contentType,
+		"gpt-image-2-2k",
+	)
+	if err != nil {
+		t.Fatalf("rewriteImagesRequestModel: %v", err)
+	}
+	if patchedContentType != contentType {
+		t.Fatalf("content type = %q, want %q", patchedContentType, contentType)
+	}
+
+	parsed, err := parseImagesRequest(patched, patchedContentType, true)
+	if err != nil {
+		t.Fatalf("parseImagesRequest: %v", err)
+	}
+	if parsed.Model != "gpt-image-2-2k" || parsed.Prompt != "relight the product" {
+		t.Fatalf("rewritten fields = %+v", parsed)
+	}
+	if len(parsed.Images) != 1 {
+		t.Fatalf("images = %d, want 1", len(parsed.Images))
+	}
+	_, gotImageBytes, err := decodeDataImageURL(parsed.Images[0])
+	if err != nil {
+		t.Fatalf("decodeDataImageURL: %v", err)
+	}
+	if !bytes.Equal(gotImageBytes, imageBytes) {
+		t.Fatalf("image bytes changed: got %x want %x", gotImageBytes, imageBytes)
+	}
+}
+
 // TestFillUsageCostPerImageBySize 验证图像输出 token 归入 image cost。
 func TestFillUsageCostPerImageBySize(t *testing.T) {
 	cases := []struct {
@@ -1017,6 +1097,56 @@ func TestForwardAPIKeyRejectsUnsupportedImageSizeBeforeUpstream(t *testing.T) {
 	}
 	if !strings.Contains(string(outcome.Upstream.Body), "2048x2048") {
 		t.Fatalf("body = %s", outcome.Upstream.Body)
+	}
+}
+
+func TestForwardAPIKeyMapsGPTImage2SizeToUpstreamModel(t *testing.T) {
+	tests := []struct {
+		size      string
+		wantModel string
+	}{
+		{size: "1024x1024", wantModel: "gpt-image-2-1k"},
+		{size: "2048x1152", wantModel: "gpt-image-2-2k"},
+		{size: "3840x2160", wantModel: "gpt-image-2-4k"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.wantModel, func(t *testing.T) {
+			var upstreamModel string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body, _ := io.ReadAll(r.Body)
+				upstreamModel = gjson.GetBytes(body, "model").String()
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = fmt.Fprintf(w, `{"model":%q,"data":[{"b64_json":"AA=="}]}`, tt.wantModel)
+			}))
+			defer server.Close()
+
+			g := &OpenAIGateway{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+			headers := http.Header{}
+			headers.Set("X-Forwarded-Path", "/v1/images/generations")
+			headers.Set("Content-Type", "application/json")
+			body := []byte(fmt.Sprintf(`{"model":"gpt-image-2","prompt":"a product hero","size":%q}`, tt.size))
+			outcome, err := g.forwardAPIKey(context.Background(), &sdk.ForwardRequest{
+				Account: &sdk.Account{ID: 1, Credentials: map[string]string{
+					"base_url": server.URL,
+					"api_key":  "sk-test",
+				}},
+				Model:   "gpt-image-2",
+				Body:    body,
+				Headers: headers,
+			}, "")
+			if err != nil {
+				t.Fatalf("forwardAPIKey returned err: %v", err)
+			}
+			if outcome.Kind != sdk.OutcomeSuccess {
+				t.Fatalf("Kind = %v, want success; body=%s", outcome.Kind, outcome.Upstream.Body)
+			}
+			if upstreamModel != tt.wantModel {
+				t.Fatalf("upstream model = %q, want %q", upstreamModel, tt.wantModel)
+			}
+			if outcome.Usage == nil || outcome.Usage.Model != "gpt-image-2" {
+				t.Fatalf("billing model = %v, want public gpt-image-2", outcome.Usage)
+			}
+		})
 	}
 }
 
