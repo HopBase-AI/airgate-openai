@@ -616,7 +616,13 @@ func multipartImageRef(contentType string, data []byte, text string) (string, er
 	if strings.HasPrefix(mainType, "image/") {
 		return "data:" + mainType + ";base64," + base64.StdEncoding.EncodeToString(data), nil
 	}
-	if mainType == "" || strings.HasPrefix(mainType, "text/") {
+	// Go's multipart.CreateFormFile and several OpenAI SDKs label uploaded
+	// images as application/octet-stream. Detect the actual payload before
+	// rejecting it so native multipart edits still reach model resolution.
+	if detected := strings.ToLower(strings.TrimSpace(strings.SplitN(http.DetectContentType(data), ";", 2)[0])); strings.HasPrefix(detected, "image/") {
+		return "data:" + detected + ";base64," + base64.StdEncoding.EncodeToString(data), nil
+	}
+	if mainType == "" || mainType == "application/octet-stream" || strings.HasPrefix(mainType, "text/") {
 		return normalizeImageRef(text)
 	}
 	return "", fmt.Errorf("不支持的 multipart 图片 Content-Type: %s", contentType)
