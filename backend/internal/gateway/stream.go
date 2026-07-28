@@ -85,6 +85,10 @@ func handleStreamResponse(resp *http.Response, w http.ResponseWriter, start time
 }
 
 func handleStreamResponseWithLogger(logger *slog.Logger, resp *http.Response, w http.ResponseWriter, start time.Time, reqServiceTier string) (sdk.ForwardOutcome, error) {
+	return handleStreamResponseWithKeepAlive(logger, resp, w, start, reqServiceTier, responseStreamKeepAliveInterval)
+}
+
+func handleStreamResponseWithKeepAlive(logger *slog.Logger, resp *http.Response, w http.ResponseWriter, start time.Time, reqServiceTier string, keepAliveInterval time.Duration) (sdk.ForwardOutcome, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -93,6 +97,9 @@ func handleStreamResponseWithLogger(logger *slog.Logger, resp *http.Response, w 
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
 	passCodexRateLimitHeaders(resp.Header, w.Header())
+	w = &synchronizedResponseWriter{ResponseWriter: w}
+	keepAlive := startSSECommentKeepAlive(w, keepAliveInterval)
+	defer keepAlive.Stop()
 
 	usage := newTokenUsage("", reqServiceTier, 0, 0, 0, 0, 0)
 	scanner := bufio.NewScanner(resp.Body)
@@ -156,6 +163,9 @@ func handleStreamResponseWithLogger(logger *slog.Logger, resp *http.Response, w 
 		}
 
 		if !ok || data == "" || data == "[DONE]" {
+			if !streamStarted && diagnostics.hasOutput() {
+				keepAlive.Stop()
+			}
 			if err := writeOrBufferSSELine(w, resp.StatusCode, lineForClient, &pending, &streamStarted, diagnostics.hasOutput()); err != nil {
 				streamErr = fmt.Errorf("写入客户端 SSE 失败: %w", err)
 				break
@@ -167,6 +177,9 @@ func handleStreamResponseWithLogger(logger *slog.Logger, resp *http.Response, w 
 			firstTokenRecorded = true
 		}
 		parseSSEUsage([]byte(data), usage, &toolImageIn, &toolImageOut)
+		if !streamStarted && diagnostics.hasOutput() {
+			keepAlive.Stop()
+		}
 		if err := writeOrBufferSSELine(w, resp.StatusCode, lineForClient, &pending, &streamStarted, diagnostics.hasOutput()); err != nil {
 			streamErr = fmt.Errorf("写入客户端 SSE 失败: %w", err)
 			break
