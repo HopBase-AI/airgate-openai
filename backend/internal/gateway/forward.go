@@ -240,26 +240,39 @@ func (g *OpenAIGateway) forwardAPIKey(ctx context.Context, req *sdk.ForwardReque
 		req.Body = normalizeGeminiVideoParts(req.Body)
 	}
 	imagesBillingSize := ""
+	imagesPublicModel := ""
+	imagesUpstreamModel := ""
 	var parsedImages *imagesRequest
-	var imagesParseErr error
 	if isImagesRequest(reqPath) && len(req.Body) > 0 {
-		parsedImages, imagesParseErr = parseImagesRequest(req.Body, req.Headers.Get("Content-Type"), isImagesEditRequest(reqPath))
-		if imagesParseErr == nil {
-			if err := validateImageModelSize(firstNonEmptyString(parsedImages.Model, req.Model), parsedImages.Size); err != nil {
-				errBody := jsonError(err.Error())
-				return sdk.ForwardOutcome{
-					Kind: sdk.OutcomeClientError,
-					Upstream: sdk.UpstreamResponse{
-						StatusCode: http.StatusBadRequest,
-						Headers:    http.Header{"Content-Type": []string{"application/json"}},
-						Body:       errBody,
-					},
-					Reason:   err.Error(),
-					Duration: time.Since(start),
-				}, nil
-			}
-			imagesBillingSize = parsedImages.Size
+		var err error
+		parsedImages, err = parseImagesRequest(req.Body, req.Headers.Get("Content-Type"), isImagesEditRequest(reqPath))
+		if err != nil {
+			errBody := jsonError(err.Error())
+			return sdk.ForwardOutcome{
+				Kind: sdk.OutcomeClientError,
+				Upstream: sdk.UpstreamResponse{
+					StatusCode: http.StatusBadRequest,
+					Headers:    http.Header{"Content-Type": []string{"application/json"}},
+					Body:       errBody,
+				},
+				Reason:   err.Error(),
+				Duration: time.Since(start),
+			}, nil
 		}
+		if err := validateImageModelSize(firstNonEmptyString(parsedImages.Model, req.Model), parsedImages.Size); err != nil {
+			errBody := jsonError(err.Error())
+			return sdk.ForwardOutcome{
+				Kind: sdk.OutcomeClientError,
+				Upstream: sdk.UpstreamResponse{
+					StatusCode: http.StatusBadRequest,
+					Headers:    http.Header{"Content-Type": []string{"application/json"}},
+					Body:       errBody,
+				},
+				Reason:   err.Error(),
+				Duration: time.Since(start),
+			}, nil
+		}
+		imagesBillingSize = parsedImages.Size
 	}
 	if isImagesRequest(reqPath) {
 		bridgeModel := req.Model
@@ -272,32 +285,8 @@ func (g *OpenAIGateway) forwardAPIKey(ctx context.Context, req *sdk.ForwardReque
 			return g.forwardAPIKeyGeminiImageViaChat(ctx, req, parsedImages, start)
 		}
 		if parsedImages != nil {
-			upstreamModel := imageUpstreamModelID(bridgeModel, parsedImages.Size)
-			if upstreamModel != bridgeModel {
-				body, contentType, err := rewriteImagesRequestModel(
-					req.Body,
-					req.Headers.Get("Content-Type"),
-					upstreamModel,
-				)
-				if err != nil {
-					errBody := jsonError(err.Error())
-					return sdk.ForwardOutcome{
-						Kind: sdk.OutcomeClientError,
-						Upstream: sdk.UpstreamResponse{
-							StatusCode: http.StatusBadRequest,
-							Headers:    http.Header{"Content-Type": []string{"application/json"}},
-							Body:       errBody,
-						},
-						Reason:   err.Error(),
-						Duration: time.Since(start),
-					}, nil
-				}
-				req.Body = body
-				parsedImages.Model = upstreamModel
-				if contentType != "" {
-					req.Headers.Set("Content-Type", contentType)
-				}
-			}
+			imagesPublicModel = strings.TrimSpace(bridgeModel)
+			imagesUpstreamModel = imageUpstreamModelID(imagesPublicModel, parsedImages.Size)
 		}
 	}
 	if isImagesEditRequest(reqPath) && len(req.Body) > 0 && !strings.HasPrefix(strings.ToLower(req.Headers.Get("Content-Type")), "multipart/") {
@@ -317,10 +306,45 @@ func (g *OpenAIGateway) forwardAPIKey(ctx context.Context, req *sdk.ForwardReque
 		}
 		req.Body = body
 		req.Headers.Set("Content-Type", contentType)
-	} else if isImagesRequest(reqPath) && len(req.Body) > 0 && !strings.HasPrefix(req.Headers.Get("Content-Type"), "multipart/") {
+	} else if isImagesRequest(reqPath) && len(req.Body) > 0 && !strings.HasPrefix(strings.ToLower(req.Headers.Get("Content-Type")), "multipart/") {
 		if patched, err := sjson.DeleteBytes(req.Body, "stream"); err == nil {
 			req.Body = patched
 		}
+	}
+
+	// Resolve the relay-specific GPT Image 2 ID at the last shared outbound
+	// boundary. JSON edit requests have already been converted to multipart by
+	// this point, so no later transformation can restore the public alias.
+	if parsedImages != nil && imagesUpstreamModel != "" && !strings.EqualFold(imagesUpstreamModel, imagesPublicModel) {
+		body, contentType, err := rewriteImagesRequestModel(
+			req.Body,
+			req.Headers.Get("Content-Type"),
+			imagesUpstreamModel,
+		)
+		if err != nil {
+			errBody := jsonError(err.Error())
+			return sdk.ForwardOutcome{
+				Kind: sdk.OutcomeClientError,
+				Upstream: sdk.UpstreamResponse{
+					StatusCode: http.StatusBadRequest,
+					Headers:    http.Header{"Content-Type": []string{"application/json"}},
+					Body:       errBody,
+				},
+				Reason:   err.Error(),
+				Duration: time.Since(start),
+			}, nil
+		}
+		req.Body = body
+		parsedImages.Model = imagesUpstreamModel
+		if contentType != "" {
+			req.Headers.Set("Content-Type", contentType)
+		}
+		logger.Info("images_upstream_model_resolved",
+			"public_model", imagesPublicModel,
+			"upstream_model", imagesUpstreamModel,
+			"size", parsedImages.Size,
+			"path", reqPath,
+		)
 	}
 
 	var bodyReader io.Reader
