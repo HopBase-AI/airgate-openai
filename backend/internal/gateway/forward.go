@@ -271,6 +271,34 @@ func (g *OpenAIGateway) forwardAPIKey(ctx context.Context, req *sdk.ForwardReque
 		if isGeminiImageModel(bridgeModel) {
 			return g.forwardAPIKeyGeminiImageViaChat(ctx, req, parsedImages, start)
 		}
+		if parsedImages != nil {
+			upstreamModel := imageUpstreamModelID(bridgeModel, parsedImages.Size)
+			if upstreamModel != bridgeModel {
+				body, contentType, err := rewriteImagesRequestModel(
+					req.Body,
+					req.Headers.Get("Content-Type"),
+					upstreamModel,
+				)
+				if err != nil {
+					errBody := jsonError(err.Error())
+					return sdk.ForwardOutcome{
+						Kind: sdk.OutcomeClientError,
+						Upstream: sdk.UpstreamResponse{
+							StatusCode: http.StatusBadRequest,
+							Headers:    http.Header{"Content-Type": []string{"application/json"}},
+							Body:       errBody,
+						},
+						Reason:   err.Error(),
+						Duration: time.Since(start),
+					}, nil
+				}
+				req.Body = body
+				parsedImages.Model = upstreamModel
+				if contentType != "" {
+					req.Headers.Set("Content-Type", contentType)
+				}
+			}
+		}
 	}
 	if isImagesEditRequest(reqPath) && len(req.Body) > 0 && !strings.HasPrefix(strings.ToLower(req.Headers.Get("Content-Type")), "multipart/") {
 		body, contentType, err := buildAPIKeyImagesEditMultipartBody(req.Body, req.Headers.Get("Content-Type"))
