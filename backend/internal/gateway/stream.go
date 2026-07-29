@@ -109,6 +109,8 @@ func handleStreamResponseWithKeepAlive(logger *slog.Logger, resp *http.Response,
 	streamStarted := false
 	completed := false
 	streamErrLogged := false
+	streamErrorWritten := false
+	clientWriteFailed := false
 	debugUpstreamSSE := os.Getenv(debugUpstreamSSEEnv) == "1"
 	diagnostics := streamResponseDiagnostics{}
 	var pending strings.Builder
@@ -134,6 +136,7 @@ func handleStreamResponseWithKeepAlive(logger *slog.Logger, resp *http.Response,
 					streamErrLogged = true
 					if streamStarted {
 						writeSanitizedSSEError(w)
+						streamErrorWritten = true
 					}
 					break
 				}
@@ -150,6 +153,7 @@ func handleStreamResponseWithKeepAlive(logger *slog.Logger, resp *http.Response,
 				streamErrLogged = true
 				if streamStarted {
 					writeSanitizedSSEError(w)
+					streamErrorWritten = true
 				}
 				break
 			}
@@ -168,6 +172,7 @@ func handleStreamResponseWithKeepAlive(logger *slog.Logger, resp *http.Response,
 			}
 			if err := writeOrBufferSSELine(w, resp.StatusCode, lineForClient, &pending, &streamStarted, diagnostics.hasOutput()); err != nil {
 				streamErr = fmt.Errorf("写入客户端 SSE 失败: %w", err)
+				clientWriteFailed = true
 				break
 			}
 			continue
@@ -182,6 +187,7 @@ func handleStreamResponseWithKeepAlive(logger *slog.Logger, resp *http.Response,
 		}
 		if err := writeOrBufferSSELine(w, resp.StatusCode, lineForClient, &pending, &streamStarted, diagnostics.hasOutput()); err != nil {
 			streamErr = fmt.Errorf("写入客户端 SSE 失败: %w", err)
+			clientWriteFailed = true
 			break
 		}
 	}
@@ -193,6 +199,9 @@ func handleStreamResponseWithKeepAlive(logger *slog.Logger, resp *http.Response,
 	}
 	if streamErr == nil && completed && !diagnostics.hasOutput() {
 		streamErr = fmt.Errorf("上游流式响应为空：已收到完成事件但没有文本、工具调用或响应输出")
+	}
+	if streamErr != nil && streamStarted && !streamErrorWritten && !clientWriteFailed {
+		writeSanitizedSSEError(w)
 	}
 
 	elapsed := time.Since(start)
