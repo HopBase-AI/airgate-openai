@@ -416,6 +416,9 @@ func TestHandleStreamResponseTreatsPartialImageB64AsOutput(t *testing.T) {
 	if !strings.Contains(w.Body.String(), `"partial_image_b64":"aGVsbG8="`) {
 		t.Fatalf("partial image event should be forwarded: %q", w.Body.String())
 	}
+	if !strings.Contains(w.Body.String(), "\"code\":\"upstream_error\"") {
+		t.Fatalf("partial stream should end with a sanitized SSE error: %q", w.Body.String())
+	}
 }
 
 func TestHandleStreamResponseRecordsDeliveredImagesWhenStreamAborts(t *testing.T) {
