@@ -1684,6 +1684,29 @@ func (g *OpenAIGateway) handleImagesResponse(resp *http.Response, w http.Respons
 	return handleImagesResponseWithLogger(g.logger, resp, w, sseKA, start, fallbackModel, billingSize...)
 }
 
+// normalizeImagesResponseModelAliases keeps relay-only model IDs out of the
+// public response. Usage attribution uses the same public alias below.
+func normalizeImagesResponseModelAliases(body []byte, fallbackModel string) []byte {
+	responseModel := strings.TrimSpace(gjson.GetBytes(body, "model").String())
+	if publicModel := imagePublicModelID(responseModel, fallbackModel); publicModel != "" && publicModel != responseModel {
+		if patched, err := sjsonSetBytes(body, "model", publicModel); err == nil {
+			body = patched
+		}
+	}
+
+	for index, item := range gjson.GetBytes(body, "data").Array() {
+		itemModel := strings.TrimSpace(item.Get("model").String())
+		publicModel := imagePublicModelID(itemModel, fallbackModel)
+		if publicModel == "" || publicModel == itemModel {
+			continue
+		}
+		if patched, err := sjsonSetBytes(body, fmt.Sprintf("data.%d.model", index), publicModel); err == nil {
+			body = patched
+		}
+	}
+	return body
+}
+
 func handleImagesResponseWithLogger(logger *slog.Logger, resp *http.Response, w http.ResponseWriter, sseKA *ssePingKeepAlive, start time.Time, fallbackModel string, billingSize ...string) (sdk.ForwardOutcome, error) {
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -1697,6 +1720,7 @@ func handleImagesResponseWithLogger(logger *slog.Logger, resp *http.Response, w 
 		}
 		return transientOutcome(reason), fmt.Errorf("%s", reason)
 	}
+	body = normalizeImagesResponseModelAliases(body, fallbackModel)
 
 	parsed := parseUsage(body)
 	headers := resp.Header.Clone()
