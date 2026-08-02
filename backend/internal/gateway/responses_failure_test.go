@@ -117,6 +117,74 @@ func TestClassifyHTTPFailureTreatsDisabled400AsAccountDead(t *testing.T) {
 	}
 }
 
+func TestClassifyHTTPFailureProductionErrorMatrix(t *testing.T) {
+	tests := []struct {
+		name    string
+		status  int
+		message string
+		want    sdk.OutcomeKind
+	}{
+		{"429 pending concurrency", 429, "Too many pending requests, please retry later", sdk.OutcomeAccountRateLimited},
+		{"429 upstream rate limit", 429, "Upstream rate limit exceeded, please retry later", sdk.OutcomeAccountRateLimited},
+		{"429 cloudflare 1015", 429, "error code: 1015", sdk.OutcomeAccountRateLimited},
+		{"403 insufficient balance", 403, `{"code":"INSUFFICIENT_BALANCE","message":"Insufficient account balance"}`, sdk.OutcomeAccountDead},
+		{"401 invalid credential", 401, "invalid token", sdk.OutcomeAccountDead},
+		{"502 relay failure", 502, "error code: 502", sdk.OutcomeUpstreamTransient},
+		{"503 temporary outage", 503, "Service temporarily unavailable", sdk.OutcomeUpstreamTransient},
+		{"400 invalid request", 400, "invalid request payload", sdk.OutcomeClientError},
+		{"404 model unavailable", 404, "model_not_found", sdk.OutcomeClientError},
+		{"419 nonstandard client response", 419, "session expired", sdk.OutcomeClientError},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := classifyHTTPFailure(tt.status, tt.message); got != tt.want {
+				t.Fatalf("classifyHTTPFailure(%d, %q) = %v, want %v", tt.status, tt.message, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestClassifyResponsesFailureProductionSSEMatrix(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want sdk.OutcomeKind
+	}{
+		{
+			name: "server overloaded is retryable rate limit",
+			raw:  `{"type":"response.failed","response":{"error":{"type":"service_unavailable_error","code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later."}}}`,
+			want: sdk.OutcomeAccountRateLimited,
+		},
+		{
+			name: "generic upstream error is transient",
+			raw:  `{"type":"response.failed","response":{"error":{"type":"server_error","code":"upstream_error","message":"Upstream request failed"}}}`,
+			want: sdk.OutcomeUpstreamTransient,
+		},
+		{
+			name: "context window remains client error",
+			raw:  `{"type":"response.failed","response":{"error":{"type":"invalid_request_error","code":"context_length_exceeded","message":"Your input exceeds the context window"}}}`,
+			want: sdk.OutcomeClientError,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			failure := classifyResponsesFailure([]byte(tt.raw))
+			if failure == nil {
+				t.Fatal("expected classified failure")
+			}
+			if got := failure.outcomeKind(); got != tt.want {
+				t.Fatalf("outcome = %v, want %v; failure=%+v", got, tt.want, failure)
+			}
+		})
+	}
+}
+
 func TestClassifyAnthropicBodyTreatsUsageLimit403AsRateLimited(t *testing.T) {
 	body := []byte(`{"error":{"message":"The usage limit has been reached. Try again later."}}`)
 	got := classifyAnthropicBody(403, body)
