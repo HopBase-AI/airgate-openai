@@ -15,6 +15,7 @@ import (
 	"log/slog"
 	"math"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/textproto"
@@ -504,6 +505,48 @@ func TestImageUpstreamModelID(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := imageUpstreamModelID(tt.model, tt.size); got != tt.want {
 				t.Fatalf("imageUpstreamModelID(%q, %q) = %q, want %q", tt.model, tt.size, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestImageUpstreamModelIDForAccount(t *testing.T) {
+	tests := []struct {
+		name    string
+		baseURL string
+		model   string
+		size    string
+		want    string
+	}{
+		{name: "yhshu public alias", baseURL: "https://www.yhshu.ai", model: "gpt-image-2", size: "3840x2160", want: yhshuGPTImage2UpstreamModel},
+		{name: "yhshu subdomain and path", baseURL: "https://api.yhshu.ai/v1", model: "gpt-image-2", size: "1024x1024", want: yhshuGPTImage2UpstreamModel},
+		{name: "lookalike host is rejected", baseURL: "https://yhshu.ai.example.com", model: "gpt-image-2", size: "2048x1152", want: "gpt-image-2-2k"},
+		{name: "other upstream keeps tier mapping", baseURL: "https://relay.example.com", model: "gpt-image-2", size: "3840x2160", want: "gpt-image-2-4k"},
+		{name: "other yhshu model unchanged", baseURL: "https://www.yhshu.ai", model: "gemini-3-pro-image", size: "3840x2160", want: "gemini-3-pro-image"},
+		{name: "codex variant unchanged", baseURL: "https://www.yhshu.ai", model: "gpt-image-2-codex", size: "1024x1024", want: "gpt-image-2-codex"},
+		{name: "yhshu legacy tier alias", baseURL: "https://www.yhshu.ai", model: "gpt-image-2-4k", size: "1024x1024", want: yhshuGPTImage2UpstreamModel},
+		{name: "other upstream legacy tier unchanged", baseURL: "https://relay.example.com", model: "gpt-image-2-4k", size: "1024x1024", want: "gpt-image-2-4k"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			account := &sdk.Account{Credentials: map[string]string{"base_url": tt.baseURL}}
+			if got := imageUpstreamModelIDForAccount(account, tt.model, tt.size); got != tt.want {
+				t.Fatalf("imageUpstreamModelIDForAccount(%q, %q, %q) = %q, want %q", tt.baseURL, tt.model, tt.size, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestNormalizeImagesResponseModelAliasesPreservesRequestedPublicID(t *testing.T) {
+	for _, fallbackModel := range []string{"gpt-image-2", "gpt-image-2-1k", "gpt-image-2-2k", "gpt-image-2-4k"} {
+		t.Run(fallbackModel, func(t *testing.T) {
+			body := []byte(`{"model":"gpt-image-2-124k","data":[{"model":"gpt-image-2-124k","b64_json":"AA=="}]}`)
+			normalized := normalizeImagesResponseModelAliases(body, fallbackModel)
+			if got := gjson.GetBytes(normalized, "model").String(); got != fallbackModel {
+				t.Fatalf("root model = %q, want %q; body=%s", got, fallbackModel, normalized)
+			}
+			if got := gjson.GetBytes(normalized, "data.0.model").String(); got != fallbackModel {
+				t.Fatalf("item model = %q, want %q; body=%s", got, fallbackModel, normalized)
 			}
 		})
 	}
@@ -1207,6 +1250,115 @@ func TestForwardAPIKeyMapsGPTImage2SizeAcrossOutboundPaths(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestForwardAPIKeyMapsYhshuGPTImage2AcrossOutboundPaths(t *testing.T) {
+	paths := []struct {
+		name      string
+		path      string
+		multipart bool
+	}{
+		{name: "generate_json", path: "/v1/images/generations"},
+		{name: "edit_json", path: "/v1/images/edits"},
+		{name: "edit_multipart", path: "/v1/images/edits", multipart: true},
+	}
+
+	_, imageBytes, err := decodeDataImageURL(tinyPNGDataURL)
+	if err != nil {
+		t.Fatalf("decodeDataImageURL: %v", err)
+	}
+	for index, pathCase := range paths {
+		t.Run(pathCase.name, func(t *testing.T) {
+			var upstreamModel string
+			var upstreamPath string
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				upstreamPath = r.URL.Path
+				if strings.HasPrefix(strings.ToLower(r.Header.Get("Content-Type")), "multipart/") {
+					if err := r.ParseMultipartForm(2 << 20); err != nil {
+						t.Errorf("ParseMultipartForm: %v", err)
+					} else {
+						upstreamModel = r.FormValue("model")
+					}
+				} else {
+					body, _ := io.ReadAll(r.Body)
+					upstreamModel = gjson.GetBytes(body, "model").String()
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = fmt.Fprintf(w, `{"model":%q,"data":[{"model":%q,"b64_json":"AA=="}]}`, yhshuGPTImage2UpstreamModel, yhshuGPTImage2UpstreamModel)
+			}))
+			defer server.Close()
+
+			accountID := int64(700 + index)
+			transport := server.Client().Transport.(*http.Transport).Clone()
+			transport.TLSClientConfig.ServerName = "example.com"
+			targetAddress := server.Listener.Addr().String()
+			transport.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
+				return (&net.Dialer{}).DialContext(ctx, network, targetAddress)
+			}
+			pool := NewTransportPool()
+			pool.transports[poolKey(accountID, "")] = transport
+			defer pool.CloseIdle()
+
+			headers := http.Header{}
+			headers.Set("X-Forwarded-Path", pathCase.path)
+			var body []byte
+			if pathCase.multipart {
+				var buf bytes.Buffer
+				writer := multipart.NewWriter(&buf)
+				_ = writer.WriteField("model", "gpt-image-2")
+				_ = writer.WriteField("prompt", "a product hero")
+				_ = writer.WriteField("size", "2048x1152")
+				part, createErr := writer.CreateFormFile("image", "input.png")
+				if createErr != nil {
+					t.Fatal(createErr)
+				}
+				_, _ = part.Write(imageBytes)
+				if closeErr := writer.Close(); closeErr != nil {
+					t.Fatal(closeErr)
+				}
+				body = buf.Bytes()
+				headers.Set("Content-Type", writer.FormDataContentType())
+			} else {
+				body = []byte(`{"model":"gpt-image-2","prompt":"a product hero","size":"2048x1152"}`)
+				if pathCase.path == "/v1/images/edits" {
+					body = []byte(fmt.Sprintf(`{"model":"gpt-image-2","prompt":"a product hero","size":"2048x1152","image":%q}`, tinyPNGDataURL))
+				}
+				headers.Set("Content-Type", "application/json")
+			}
+
+			g := &OpenAIGateway{
+				logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+				transportPool: pool,
+			}
+			outcome, err := g.forwardAPIKey(context.Background(), &sdk.ForwardRequest{
+				Account: &sdk.Account{ID: accountID, Credentials: map[string]string{
+					"base_url": "https://www.yhshu.ai",
+					"api_key":  "sk-test",
+				}},
+				Model:   "gpt-image-2",
+				Body:    body,
+				Headers: headers,
+			}, "")
+			if err != nil || outcome.Kind != sdk.OutcomeSuccess {
+				t.Fatalf("forward outcome=%v err=%v body=%s", outcome.Kind, err, outcome.Upstream.Body)
+			}
+			if upstreamPath != pathCase.path {
+				t.Fatalf("upstream path = %q, want %q", upstreamPath, pathCase.path)
+			}
+			if upstreamModel != yhshuGPTImage2UpstreamModel {
+				t.Fatalf("upstream model = %q, want %q", upstreamModel, yhshuGPTImage2UpstreamModel)
+			}
+			if outcome.Usage == nil || outcome.Usage.Model != "gpt-image-2" {
+				t.Fatalf("billing model = %v, want public gpt-image-2", outcome.Usage)
+			}
+			if got := gjson.GetBytes(outcome.Upstream.Body, "model").String(); got != "gpt-image-2" {
+				t.Fatalf("response root model = %q, want public alias; body=%s", got, outcome.Upstream.Body)
+			}
+			if got := gjson.GetBytes(outcome.Upstream.Body, "data.0.model").String(); got != "gpt-image-2" {
+				t.Fatalf("response item model = %q, want public alias; body=%s", got, outcome.Upstream.Body)
+			}
+		})
 	}
 }
 

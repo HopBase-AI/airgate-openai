@@ -3,6 +3,7 @@ package gateway
 import (
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -672,15 +673,53 @@ func imageUpstreamModelID(modelID, size string) string {
 	return "gpt-image-2-" + imageTierForSize(size)
 }
 
+const yhshuGPTImage2UpstreamModel = "gpt-image-2-124k"
+
+// imageUpstreamModelIDForAccount applies provider-specific aliases only after
+// Core has selected the upstream account. yhshu.ai exposes GPT Image 2 under a
+// single 124K model ID, while other relay providers still use per-size IDs.
+func imageUpstreamModelIDForAccount(account *sdk.Account, modelID, size string) string {
+	modelID = strings.TrimSpace(modelID)
+	if isGPTImage2PublicModel(modelID) && isYhshuAccount(account) {
+		return yhshuGPTImage2UpstreamModel
+	}
+	return imageUpstreamModelID(modelID, size)
+}
+
+func isGPTImage2PublicModel(modelID string) bool {
+	switch strings.ToLower(strings.TrimSpace(modelID)) {
+	case "gpt-image-2", "gpt-image-2-1k", "gpt-image-2-2k", "gpt-image-2-4k":
+		return true
+	default:
+		return false
+	}
+}
+
+func isYhshuAccount(account *sdk.Account) bool {
+	if account == nil {
+		return false
+	}
+	raw := strings.TrimSpace(account.Credentials["base_url"])
+	if raw == "" {
+		return false
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Hostname() == "" {
+		return false
+	}
+	host := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(u.Hostname())), ".")
+	return host == "yhshu.ai" || strings.HasSuffix(host, ".yhshu.ai")
+}
+
 func imagePublicModelID(responseModel, fallbackModel string) string {
 	responseModel = strings.TrimSpace(responseModel)
 	fallbackModel = strings.TrimSpace(fallbackModel)
-	if !strings.EqualFold(fallbackModel, "gpt-image-2") {
+	if !isGPTImage2PublicModel(fallbackModel) {
 		return responseModel
 	}
 	switch strings.ToLower(responseModel) {
-	case "gpt-image-2-1k", "gpt-image-2-2k", "gpt-image-2-4k":
-		return "gpt-image-2"
+	case "gpt-image-2-1k", "gpt-image-2-2k", "gpt-image-2-4k", yhshuGPTImage2UpstreamModel:
+		return fallbackModel
 	default:
 		return responseModel
 	}
