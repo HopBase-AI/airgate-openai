@@ -21,6 +21,58 @@ func TestBuildGeminiImageChatRequestBodyTextOnly(t *testing.T) {
 	if got := gjson.GetBytes(body, "modalities").Raw; !strings.Contains(got, "image") {
 		t.Fatalf("modalities 缺 image: %s", got)
 	}
+	if got := gjson.GetBytes(body, "extra_body"); got.Exists() {
+		t.Fatalf("未指定尺寸时不应注入 image_config: %s", got.Raw)
+	}
+}
+
+func TestBuildGeminiImageChatRequestBodyAddsGoogleImageConfig(t *testing.T) {
+	tests := []struct {
+		size        string
+		aspectRatio string
+		imageSize   string
+	}{
+		{size: "1024x1024", aspectRatio: "1:1", imageSize: "1K"},
+		{size: "1536x1024", aspectRatio: "3:2", imageSize: "1K"},
+		{size: "1024x1536", aspectRatio: "2:3", imageSize: "1K"},
+		{size: "2048x2048", aspectRatio: "1:1", imageSize: "2K"},
+		{size: "2048x1152", aspectRatio: "16:9", imageSize: "2K"},
+		{size: "1152x2048", aspectRatio: "9:16", imageSize: "2K"},
+		{size: "3840x2160", aspectRatio: "16:9", imageSize: "4K"},
+		{size: "2160x3840", aspectRatio: "9:16", imageSize: "4K"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.size, func(t *testing.T) {
+			body, err := buildGeminiImageChatRequestBody("gemini-3-pro-image", &imagesRequest{
+				Prompt: "a cat",
+				Size:   tt.size,
+			})
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			config := gjson.GetBytes(body, "extra_body.google.image_config")
+			if got := config.Get("aspect_ratio").String(); got != tt.aspectRatio {
+				t.Fatalf("aspect_ratio = %q, want %q", got, tt.aspectRatio)
+			}
+			if got := config.Get("image_size").String(); got != tt.imageSize {
+				t.Fatalf("image_size = %q, want %q", got, tt.imageSize)
+			}
+		})
+	}
+}
+
+func TestBuildGeminiImageChatRequestBodySkipsUnknownImageConfig(t *testing.T) {
+	body, err := buildGeminiImageChatRequestBody("gemini-3-pro-image", &imagesRequest{
+		Prompt: "a cat",
+		Size:   "auto",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := gjson.GetBytes(body, "extra_body"); got.Exists() {
+		t.Fatalf("未知尺寸不应注入 image_config: %s", got.Raw)
+	}
 }
 
 func TestBuildGeminiImageChatRequestBodyWithImages(t *testing.T) {
