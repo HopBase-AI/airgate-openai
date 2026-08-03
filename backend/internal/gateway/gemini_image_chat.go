@@ -178,7 +178,46 @@ func buildGeminiImageChatRequestBody(modelName string, req *imagesRequest) ([]by
 			"type": "image",
 		},
 	}
+	if imageConfig := geminiImageChatConfig(req); imageConfig != nil {
+		payload["extra_body"] = map[string]any{
+			"google": map[string]any{
+				"image_config": imageConfig,
+			},
+		}
+	}
 	return json.Marshal(payload)
+}
+
+func geminiImageChatConfig(req *imagesRequest) map[string]string {
+	if req == nil {
+		return nil
+	}
+	size := strings.ToLower(strings.TrimSpace(req.Size))
+	var aspectRatio, imageSize string
+	switch size {
+	case "1024x1024":
+		aspectRatio, imageSize = "1:1", "1K"
+	case "1536x1024":
+		aspectRatio, imageSize = "3:2", "1K"
+	case "1024x1536":
+		aspectRatio, imageSize = "2:3", "1K"
+	case "2048x2048":
+		aspectRatio, imageSize = "1:1", "2K"
+	case "2048x1152":
+		aspectRatio, imageSize = "16:9", "2K"
+	case "1152x2048":
+		aspectRatio, imageSize = "9:16", "2K"
+	case "3840x2160":
+		aspectRatio, imageSize = "16:9", "4K"
+	case "2160x3840":
+		aspectRatio, imageSize = "9:16", "4K"
+	default:
+		return nil
+	}
+	return map[string]string{
+		"aspect_ratio": aspectRatio,
+		"image_size":   imageSize,
+	}
 }
 
 // imageRefToDataURL 把参考图（data URL 或 http(s) URL）统一读成压缩后的 data URL，
