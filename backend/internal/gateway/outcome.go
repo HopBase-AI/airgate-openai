@@ -673,15 +673,24 @@ func imageUpstreamModelID(modelID, size string) string {
 	return "gpt-image-2-" + imageTierForSize(size)
 }
 
-const yhshuGPTImage2UpstreamModel = "gpt-image-2-124k"
+const (
+	yhshuGPTImage2UpstreamModel      = "gpt-image-2-124k"
+	gptImage2UpstreamModelCredential = "gpt_image_2_upstream_model"
+)
 
 // imageUpstreamModelIDForAccount applies provider-specific aliases only after
-// Core has selected the upstream account. yhshu.ai exposes GPT Image 2 under a
-// single 124K model ID, while other relay providers still use per-size IDs.
+// Core has selected the upstream account. An explicit credential override wins
+// because OpenAI-compatible relays do not share one naming convention. yhshu.ai
+// keeps its legacy automatic alias; other providers still use per-size IDs.
 func imageUpstreamModelIDForAccount(account *sdk.Account, modelID, size string) string {
 	modelID = strings.TrimSpace(modelID)
-	if isGPTImage2PublicModel(modelID) && isYhshuAccount(account) {
-		return yhshuGPTImage2UpstreamModel
+	if isGPTImage2PublicModel(modelID) {
+		if configured := accountCredential(account, gptImage2UpstreamModelCredential); configured != "" {
+			return configured
+		}
+		if isYhshuAccount(account) {
+			return yhshuGPTImage2UpstreamModel
+		}
 	}
 	return imageUpstreamModelID(modelID, size)
 }
@@ -696,19 +705,30 @@ func isGPTImage2PublicModel(modelID string) bool {
 }
 
 func isYhshuAccount(account *sdk.Account) bool {
+	host := accountBaseURLHost(account)
+	return host == "yhshu.ai" || strings.HasSuffix(host, ".yhshu.ai")
+}
+
+func accountCredential(account *sdk.Account, key string) string {
 	if account == nil {
-		return false
+		return ""
+	}
+	return strings.TrimSpace(account.Credentials[key])
+}
+
+func accountBaseURLHost(account *sdk.Account) string {
+	if account == nil {
+		return ""
 	}
 	raw := strings.TrimSpace(account.Credentials["base_url"])
 	if raw == "" {
-		return false
+		return ""
 	}
 	u, err := url.Parse(raw)
 	if err != nil || u.Hostname() == "" {
-		return false
+		return ""
 	}
-	host := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(u.Hostname())), ".")
-	return host == "yhshu.ai" || strings.HasSuffix(host, ".yhshu.ai")
+	return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(u.Hostname())), ".")
 }
 
 func imagePublicModelID(responseModel, fallbackModel string) string {
@@ -718,7 +738,7 @@ func imagePublicModelID(responseModel, fallbackModel string) string {
 		return responseModel
 	}
 	switch strings.ToLower(responseModel) {
-	case "gpt-image-2-1k", "gpt-image-2-2k", "gpt-image-2-4k", yhshuGPTImage2UpstreamModel:
+	case "gpt-image-2", "gpt-image-2-1k", "gpt-image-2-2k", "gpt-image-2-4k", yhshuGPTImage2UpstreamModel:
 		return fallbackModel
 	default:
 		return responseModel

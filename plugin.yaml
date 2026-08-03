@@ -426,6 +426,16 @@ gateway:
           type: text
           required: false
           placeholder: https://api.openai.com
+        - key: gpt_image_2_upstream_model
+          label: GPT Image 2 上游模型 ID
+          type: text
+          required: false
+          placeholder: 留空时按分辨率映射；兼容上游可填 gpt-image-2
+        - key: gemini_image_protocol
+          label: Gemini 生图协议
+          type: text
+          required: false
+          placeholder: 默认 chat_completions；纯 Images API 上游填 images_api
     - key: oauth
       label: OAuth 登录
       description: 通过浏览器授权登录 ChatGPT 账号

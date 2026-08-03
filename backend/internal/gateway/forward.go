@@ -281,7 +281,7 @@ func (g *OpenAIGateway) forwardAPIKey(ctx context.Context, req *sdk.ForwardReque
 		}
 		// Gemini 图片模型（generations 与 edits）统一走 chat completions 桥接：
 		// 文生图只带 prompt，图生图把参考图转成 image_url 分段一起携带。
-		if isGeminiImageModel(bridgeModel) {
+		if isGeminiImageModel(bridgeModel) && !usesGeminiImagesAPI(req.Account) {
 			return g.forwardAPIKeyGeminiImageViaChat(ctx, req, parsedImages, start)
 		}
 		if parsedImages != nil {

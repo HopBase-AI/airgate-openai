@@ -19,6 +19,18 @@ import (
 
 var markdownDataImagePattern = regexp.MustCompile(`!\[[^\]]*\]\((data:image/[^)]+)\)`)
 
+const (
+	geminiImageProtocolCredential = "gemini_image_protocol"
+	geminiImageProtocolImagesAPI  = "images_api"
+)
+
+func usesGeminiImagesAPI(account *sdk.Account) bool {
+	return strings.EqualFold(
+		accountCredential(account, geminiImageProtocolCredential),
+		geminiImageProtocolImagesAPI,
+	)
+}
+
 func isGeminiImageChatCompletionsRequest(req *sdk.ForwardRequest, reqPath string) bool {
 	if req == nil || !strings.HasSuffix(reqPath, "/chat/completions") {
 		return false

@@ -512,15 +512,18 @@ func TestImageUpstreamModelID(t *testing.T) {
 
 func TestImageUpstreamModelIDForAccount(t *testing.T) {
 	tests := []struct {
-		name    string
-		baseURL string
-		model   string
-		size    string
-		want    string
+		name          string
+		baseURL       string
+		upstreamModel string
+		model         string
+		size          string
+		want          string
 	}{
 		{name: "yhshu public alias", baseURL: "https://www.yhshu.ai", model: "gpt-image-2", size: "3840x2160", want: yhshuGPTImage2UpstreamModel},
 		{name: "yhshu subdomain and path", baseURL: "https://api.yhshu.ai/v1", model: "gpt-image-2", size: "1024x1024", want: yhshuGPTImage2UpstreamModel},
 		{name: "lookalike host is rejected", baseURL: "https://yhshu.ai.example.com", model: "gpt-image-2", size: "2048x1152", want: "gpt-image-2-2k"},
+		{name: "explicit bare public ID", baseURL: "https://relay.example.com/v1", upstreamModel: "gpt-image-2", model: "gpt-image-2", size: "3840x2160", want: "gpt-image-2"},
+		{name: "explicit custom ID collapses legacy tier", baseURL: "https://relay.example.com/v1", upstreamModel: "vendor-image-v2", model: "gpt-image-2-4k", size: "1024x1024", want: "vendor-image-v2"},
 		{name: "other upstream keeps tier mapping", baseURL: "https://relay.example.com", model: "gpt-image-2", size: "3840x2160", want: "gpt-image-2-4k"},
 		{name: "other yhshu model unchanged", baseURL: "https://www.yhshu.ai", model: "gemini-3-pro-image", size: "3840x2160", want: "gemini-3-pro-image"},
 		{name: "codex variant unchanged", baseURL: "https://www.yhshu.ai", model: "gpt-image-2-codex", size: "1024x1024", want: "gpt-image-2-codex"},
@@ -529,7 +532,10 @@ func TestImageUpstreamModelIDForAccount(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			account := &sdk.Account{Credentials: map[string]string{"base_url": tt.baseURL}}
+			account := &sdk.Account{Credentials: map[string]string{
+				"base_url":                       tt.baseURL,
+				gptImage2UpstreamModelCredential: tt.upstreamModel,
+			}}
 			if got := imageUpstreamModelIDForAccount(account, tt.model, tt.size); got != tt.want {
 				t.Fatalf("imageUpstreamModelIDForAccount(%q, %q, %q) = %q, want %q", tt.baseURL, tt.model, tt.size, got, tt.want)
 			}
@@ -540,13 +546,15 @@ func TestImageUpstreamModelIDForAccount(t *testing.T) {
 func TestNormalizeImagesResponseModelAliasesPreservesRequestedPublicID(t *testing.T) {
 	for _, fallbackModel := range []string{"gpt-image-2", "gpt-image-2-1k", "gpt-image-2-2k", "gpt-image-2-4k"} {
 		t.Run(fallbackModel, func(t *testing.T) {
-			body := []byte(`{"model":"gpt-image-2-124k","data":[{"model":"gpt-image-2-124k","b64_json":"AA=="}]}`)
-			normalized := normalizeImagesResponseModelAliases(body, fallbackModel)
-			if got := gjson.GetBytes(normalized, "model").String(); got != fallbackModel {
-				t.Fatalf("root model = %q, want %q; body=%s", got, fallbackModel, normalized)
-			}
-			if got := gjson.GetBytes(normalized, "data.0.model").String(); got != fallbackModel {
-				t.Fatalf("item model = %q, want %q; body=%s", got, fallbackModel, normalized)
+			for _, upstreamModel := range []string{yhshuGPTImage2UpstreamModel, "gpt-image-2"} {
+				body := []byte(fmt.Sprintf(`{"model":%q,"data":[{"model":%q,"b64_json":"AA=="}]}`, upstreamModel, upstreamModel))
+				normalized := normalizeImagesResponseModelAliases(body, fallbackModel)
+				if got := gjson.GetBytes(normalized, "model").String(); got != fallbackModel {
+					t.Fatalf("upstream=%q root model = %q, want %q; body=%s", upstreamModel, got, fallbackModel, normalized)
+				}
+				if got := gjson.GetBytes(normalized, "data.0.model").String(); got != fallbackModel {
+					t.Fatalf("upstream=%q item model = %q, want %q; body=%s", upstreamModel, got, fallbackModel, normalized)
+				}
 			}
 		})
 	}
@@ -1478,6 +1486,51 @@ func TestForwardAPIKeyRoutesGeminiImageThroughOpenAICompatibleChat(t *testing.T)
 	}
 	if got := gjson.GetBytes(outcome.Upstream.Body, "usage.output_tokens").Int(); got != 11 {
 		t.Fatalf("usage.output_tokens = %d, want 11", got)
+	}
+}
+
+func TestForwardAPIKeyRoutesGeminiImageThroughNativeImagesAPIWhenConfigured(t *testing.T) {
+	var gotPath string
+	var gotModel string
+	var gotSize string
+	imageB64 := testPNGBase64(1, 1, func(x, y int) color.RGBA {
+		return color.RGBA{R: 10, G: 20, B: 30, A: 255}
+	})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		body, _ := io.ReadAll(r.Body)
+		gotModel = gjson.GetBytes(body, "model").String()
+		gotSize = gjson.GetBytes(body, "size").String()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"model":"gemini-3.1-flash-image","data":[{"b64_json":%q}],"usage":{"input_tokens":7,"output_tokens":11}}`, imageB64)
+	}))
+	defer server.Close()
+
+	g := &OpenAIGateway{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	headers := http.Header{}
+	headers.Set("X-Forwarded-Path", "/v1/images/generations")
+	headers.Set("Content-Type", "application/json")
+	outcome, err := g.forwardAPIKey(context.Background(), &sdk.ForwardRequest{
+		Account: &sdk.Account{ID: 1, Credentials: map[string]string{
+			"base_url":                    server.URL + "/v1",
+			"api_key":                     "sk-test",
+			geminiImageProtocolCredential: geminiImageProtocolImagesAPI,
+		}},
+		Model:   "gemini-3.1-flash-image",
+		Body:    []byte(`{"model":"gemini-3.1-flash-image","prompt":"a product hero","size":"2048x1152","n":1}`),
+		Headers: headers,
+	}, "")
+	if err != nil || outcome.Kind != sdk.OutcomeSuccess {
+		t.Fatalf("forward outcome=%v err=%v body=%s", outcome.Kind, err, outcome.Upstream.Body)
+	}
+	if gotPath != "/v1/images/generations" {
+		t.Fatalf("path = %q, want native Images API", gotPath)
+	}
+	if gotModel != "gemini-3.1-flash-image" || gotSize != "2048x1152" {
+		t.Fatalf("model=%q size=%q", gotModel, gotSize)
+	}
+	if got := gjson.GetBytes(outcome.Upstream.Body, "data.0.b64_json").String(); got != imageB64 {
+		t.Fatalf("response b64 mismatch")
 	}
 }
 
