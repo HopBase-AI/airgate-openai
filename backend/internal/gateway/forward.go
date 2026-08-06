@@ -286,7 +286,7 @@ func (g *OpenAIGateway) forwardAPIKey(ctx context.Context, req *sdk.ForwardReque
 		}
 		if parsedImages != nil {
 			imagesPublicModel = strings.TrimSpace(bridgeModel)
-			imagesUpstreamModel = imageUpstreamModelIDForAccount(account, imagesPublicModel, parsedImages.Size)
+			imagesUpstreamModel = imageUpstreamModelIDForAccount(account, imagesPublicModel)
 		}
 	}
 	if isImagesEditRequest(reqPath) && len(req.Body) > 0 && !strings.HasPrefix(strings.ToLower(req.Headers.Get("Content-Type")), "multipart/") {

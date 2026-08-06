@@ -430,7 +430,7 @@ gateway:
           label: GPT Image 2 上游模型 ID
           type: text
           required: false
-          placeholder: 留空时按分辨率映射；兼容上游可填 gpt-image-2
+          placeholder: 留空时保持 gpt-image-2；特殊上游可填写专用模型 ID
         - key: gemini_image_protocol
           label: Gemini 生图协议
           type: text

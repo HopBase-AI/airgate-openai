@@ -63,7 +63,7 @@ func BuildPluginInfo() sdk.PluginInfo {
 				Fields: []sdk.CredentialField{
 					{Key: "api_key", Label: "API Key", Type: "password", Required: true, Placeholder: "sk-..."},
 					{Key: "base_url", Label: "API 地址", Type: "text", Required: false, Placeholder: "https://api.openai.com"},
-					{Key: gptImage2UpstreamModelCredential, Label: "GPT Image 2 上游模型 ID", Type: "text", Required: false, Placeholder: "留空时按分辨率映射；兼容上游可填 gpt-image-2"},
+					{Key: gptImage2UpstreamModelCredential, Label: "GPT Image 2 上游模型 ID", Type: "text", Required: false, Placeholder: "留空时保持 gpt-image-2；特殊上游可填写专用模型 ID"},
 					{Key: geminiImageProtocolCredential, Label: "Gemini 生图协议", Type: "text", Required: false, Placeholder: "默认 chat_completions；纯 Images API 上游填 images_api"},
 				},
 			},
