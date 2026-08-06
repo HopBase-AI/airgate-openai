@@ -662,17 +662,6 @@ func imageTierForSize(size string) string {
 	}
 }
 
-// imageUpstreamModelID maps the public GPT Image 2 alias to the resolution-
-// specific model IDs used by Images API relay providers. Other image models
-// and already-specific IDs pass through unchanged.
-func imageUpstreamModelID(modelID, size string) string {
-	modelID = strings.TrimSpace(modelID)
-	if !strings.EqualFold(modelID, "gpt-image-2") {
-		return modelID
-	}
-	return "gpt-image-2-" + imageTierForSize(size)
-}
-
 const (
 	yhshuGPTImage2UpstreamModel      = "gpt-image-2-124k"
 	gptImage2UpstreamModelCredential = "gpt_image_2_upstream_model"
@@ -681,8 +670,9 @@ const (
 // imageUpstreamModelIDForAccount applies provider-specific aliases only after
 // Core has selected the upstream account. An explicit credential override wins
 // because OpenAI-compatible relays do not share one naming convention. yhshu.ai
-// keeps its legacy automatic alias; other providers still use per-size IDs.
-func imageUpstreamModelIDForAccount(account *sdk.Account, modelID, size string) string {
+// keeps its legacy automatic alias; every other provider receives the public
+// model ID unless its account explicitly configures an override.
+func imageUpstreamModelIDForAccount(account *sdk.Account, modelID string) string {
 	modelID = strings.TrimSpace(modelID)
 	if isGPTImage2PublicModel(modelID) {
 		if configured := accountCredential(account, gptImage2UpstreamModelCredential); configured != "" {
@@ -692,7 +682,7 @@ func imageUpstreamModelIDForAccount(account *sdk.Account, modelID, size string) 
 			return yhshuGPTImage2UpstreamModel
 		}
 	}
-	return imageUpstreamModelID(modelID, size)
+	return modelID
 }
 
 func isGPTImage2PublicModel(modelID string) bool {

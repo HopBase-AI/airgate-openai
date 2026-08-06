@@ -486,49 +486,24 @@ func TestImageTierForSize(t *testing.T) {
 	}
 }
 
-func TestImageUpstreamModelID(t *testing.T) {
-	tests := []struct {
-		name  string
-		model string
-		size  string
-		want  string
-	}{
-		{name: "default 1k", model: "gpt-image-2", size: "auto", want: "gpt-image-2-1k"},
-		{name: "landscape 1k", model: "gpt-image-2", size: "1536x1024", want: "gpt-image-2-1k"},
-		{name: "portrait 2k", model: "gpt-image-2", size: "1536x2048", want: "gpt-image-2-2k"},
-		{name: "ultrawide 4k", model: "gpt-image-2", size: "3360x1440", want: "gpt-image-2-4k"},
-		{name: "case insensitive alias", model: " GPT-IMAGE-2 ", size: "2048x1152", want: "gpt-image-2-2k"},
-		{name: "other model unchanged", model: "gpt-image-1.5", size: "3840x2160", want: "gpt-image-1.5"},
-		{name: "specific model unchanged", model: "gpt-image-2-4k", size: "1024x1024", want: "gpt-image-2-4k"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := imageUpstreamModelID(tt.model, tt.size); got != tt.want {
-				t.Fatalf("imageUpstreamModelID(%q, %q) = %q, want %q", tt.model, tt.size, got, tt.want)
-			}
-		})
-	}
-}
-
 func TestImageUpstreamModelIDForAccount(t *testing.T) {
 	tests := []struct {
 		name          string
 		baseURL       string
 		upstreamModel string
 		model         string
-		size          string
 		want          string
 	}{
-		{name: "yhshu public alias", baseURL: "https://www.yhshu.ai", model: "gpt-image-2", size: "3840x2160", want: yhshuGPTImage2UpstreamModel},
-		{name: "yhshu subdomain and path", baseURL: "https://api.yhshu.ai/v1", model: "gpt-image-2", size: "1024x1024", want: yhshuGPTImage2UpstreamModel},
-		{name: "lookalike host is rejected", baseURL: "https://yhshu.ai.example.com", model: "gpt-image-2", size: "2048x1152", want: "gpt-image-2-2k"},
-		{name: "explicit bare public ID", baseURL: "https://relay.example.com/v1", upstreamModel: "gpt-image-2", model: "gpt-image-2", size: "3840x2160", want: "gpt-image-2"},
-		{name: "explicit custom ID collapses legacy tier", baseURL: "https://relay.example.com/v1", upstreamModel: "vendor-image-v2", model: "gpt-image-2-4k", size: "1024x1024", want: "vendor-image-v2"},
-		{name: "other upstream keeps tier mapping", baseURL: "https://relay.example.com", model: "gpt-image-2", size: "3840x2160", want: "gpt-image-2-4k"},
-		{name: "other yhshu model unchanged", baseURL: "https://www.yhshu.ai", model: "gemini-3-pro-image", size: "3840x2160", want: "gemini-3-pro-image"},
-		{name: "codex variant unchanged", baseURL: "https://www.yhshu.ai", model: "gpt-image-2-codex", size: "1024x1024", want: "gpt-image-2-codex"},
-		{name: "yhshu legacy tier alias", baseURL: "https://www.yhshu.ai", model: "gpt-image-2-4k", size: "1024x1024", want: yhshuGPTImage2UpstreamModel},
-		{name: "other upstream legacy tier unchanged", baseURL: "https://relay.example.com", model: "gpt-image-2-4k", size: "1024x1024", want: "gpt-image-2-4k"},
+		{name: "yhshu public alias", baseURL: "https://www.yhshu.ai", model: "gpt-image-2", want: yhshuGPTImage2UpstreamModel},
+		{name: "yhshu subdomain and path", baseURL: "https://api.yhshu.ai/v1", model: "gpt-image-2", want: yhshuGPTImage2UpstreamModel},
+		{name: "lookalike host keeps public alias", baseURL: "https://yhshu.ai.example.com", model: "gpt-image-2", want: "gpt-image-2"},
+		{name: "explicit bare public ID", baseURL: "https://relay.example.com/v1", upstreamModel: "gpt-image-2", model: "gpt-image-2", want: "gpt-image-2"},
+		{name: "explicit custom ID collapses legacy tier", baseURL: "https://relay.example.com/v1", upstreamModel: "vendor-image-v2", model: "gpt-image-2-4k", want: "vendor-image-v2"},
+		{name: "other upstream keeps public alias", baseURL: "https://relay.example.com", model: "gpt-image-2", want: "gpt-image-2"},
+		{name: "other yhshu model unchanged", baseURL: "https://www.yhshu.ai", model: "gemini-3-pro-image", want: "gemini-3-pro-image"},
+		{name: "codex variant unchanged", baseURL: "https://www.yhshu.ai", model: "gpt-image-2-codex", want: "gpt-image-2-codex"},
+		{name: "yhshu legacy tier alias", baseURL: "https://www.yhshu.ai", model: "gpt-image-2-4k", want: yhshuGPTImage2UpstreamModel},
+		{name: "other upstream legacy tier unchanged", baseURL: "https://relay.example.com", model: "gpt-image-2-4k", want: "gpt-image-2-4k"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -536,8 +511,8 @@ func TestImageUpstreamModelIDForAccount(t *testing.T) {
 				"base_url":                       tt.baseURL,
 				gptImage2UpstreamModelCredential: tt.upstreamModel,
 			}}
-			if got := imageUpstreamModelIDForAccount(account, tt.model, tt.size); got != tt.want {
-				t.Fatalf("imageUpstreamModelIDForAccount(%q, %q, %q) = %q, want %q", tt.baseURL, tt.model, tt.size, got, tt.want)
+			if got := imageUpstreamModelIDForAccount(account, tt.model); got != tt.want {
+				t.Fatalf("imageUpstreamModelIDForAccount(%q, %q) = %q, want %q", tt.baseURL, tt.model, got, tt.want)
 			}
 		})
 	}
@@ -1151,14 +1126,14 @@ func TestForwardAPIKeyRejectsUnsupportedImageSizeBeforeUpstream(t *testing.T) {
 	}
 }
 
-func TestForwardAPIKeyMapsGPTImage2SizeAcrossOutboundPaths(t *testing.T) {
+func TestForwardAPIKeyKeepsPublicGPTImage2AcrossOutboundPaths(t *testing.T) {
 	tiers := []struct {
 		size      string
 		wantModel string
 	}{
-		{size: "1024x1024", wantModel: "gpt-image-2-1k"},
-		{size: "2048x1152", wantModel: "gpt-image-2-2k"},
-		{size: "3840x2160", wantModel: "gpt-image-2-4k"},
+		{size: "1024x1024", wantModel: "gpt-image-2"},
+		{size: "2048x1152", wantModel: "gpt-image-2"},
+		{size: "3840x2160", wantModel: "gpt-image-2"},
 	}
 	paths := []struct {
 		name      string
@@ -1176,7 +1151,7 @@ func TestForwardAPIKeyMapsGPTImage2SizeAcrossOutboundPaths(t *testing.T) {
 	}
 	for _, pathCase := range paths {
 		for _, tier := range tiers {
-			t.Run(pathCase.name+"_"+tier.wantModel, func(t *testing.T) {
+			t.Run(pathCase.name+"_"+tier.size, func(t *testing.T) {
 				var upstreamModel string
 				var upstreamContentType string
 				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
