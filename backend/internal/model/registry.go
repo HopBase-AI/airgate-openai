@@ -150,6 +150,19 @@ var registry = map[string]Spec{
 	"gemini-3.1-flash-image-preview":   pricedImageSpec("Gemini 3.1 Flash Image Preview", 0.5, 0.05, 3.0),
 	"gemini-3.1-flash-image-preview-c": pricedImageSpec("Gemini 3.1 Flash Image Preview C", 0.5, 0.05, 3.0),
 	"gemini-3.1-flash-lite-image":      pricedImageSpec("Gemini 3.1 Flash Lite Image", 0.25, 0.025, 1.5),
+
+	// ── DeepSeek（OpenAI 兼容协议直连官方 API）──
+	// 官方价 2026-08-08 核实：V4-Flash $0.14 / 缓存命中 $0.0028 / $0.28，
+	// 1M 上下文、最大输出 384K；deepseek-v4-flash 现指向 V4-Flash-0731 公测版。
+	// 不用 std()：DeepSeek 没有 priority/flex 档，std 会凭空造出 ×2/×0.5 档价。
+	"deepseek-v4-flash": {
+		Name:            "DeepSeek V4 Flash",
+		ContextWindow:   1_000_000,
+		MaxOutputTokens: 384_000,
+		InputPrice:      0.14,
+		CachedPrice:     0.0028,
+		OutputPrice:     0.28,
+	},
 }
 
 // DefaultSpec 未注册模型的最终兜底值。按 gpt-5.4 标准档计价——宁可略高也不能 0。
@@ -208,8 +221,12 @@ func fallbackByKeyword(id string, reg map[string]Spec) (Spec, bool) {
 	if id == "" {
 		return Spec{}, false
 	}
-	// 顺序敏感：先细分（codex / mini / image）后粗分（gpt-5 / gpt-4）
+	// 顺序敏感：先细分（codex / mini / image）后粗分（gpt-5 / gpt-4）。
+	// deepseek 必须最先判：变体名可能含 "chat"/"mini" 等关键字，
+	// 掉进 GPT 系兜底价（$2.5/$15 vs $0.14/$0.28）就是十几倍的多收。
 	switch {
+	case strings.Contains(id, "deepseek"):
+		return reg["deepseek-v4-flash"], true
 	case strings.Contains(id, "codex"):
 		return reg["gpt-5.4"], true
 	case strings.Contains(id, "image"):
@@ -310,6 +327,9 @@ func toModelInfo(id string, spec Spec) sdk.ModelInfo {
 	}
 	mi.Metadata = priceMetadata(spec, mi.Metadata)
 	mi.Metadata["vendor"] = vendorForModel(id)
+	if series := seriesForModel(id); series != "" {
+		mi.Metadata["series"] = series
+	}
 	return mi
 }
 
@@ -323,8 +343,28 @@ func vendorForModel(id string) string {
 		return "google"
 	case strings.HasPrefix(id, "glm"):
 		return "zhipu"
+	case strings.HasPrefix(id, "deepseek"):
+		return "deepseek"
 	default:
 		return "openai"
+	}
+}
+
+// seriesForModel 按模型 ID 推断系列标识(metadata 约定键 "series",模型广场 L3 折叠)。
+// 与调度侧 family(账号家族冷却)语义不同,勿混用。空串=不折叠。
+func seriesForModel(id string) string {
+	id = strings.ToLower(strings.TrimSpace(id))
+	switch {
+	case strings.HasPrefix(id, "gpt-5.6"):
+		return "gpt-5.6"
+	case strings.HasPrefix(id, "gpt-image"):
+		return "gpt-image"
+	case strings.HasPrefix(id, "gemini") && strings.Contains(id, "image"):
+		return "gemini-image"
+	case strings.HasPrefix(id, "deepseek-v4"):
+		return "deepseek-v4"
+	default:
+		return ""
 	}
 }
 
