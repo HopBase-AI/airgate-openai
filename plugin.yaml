@@ -92,6 +92,16 @@ gateway:
       path: /responses
       description: Responses API WebSocket（无 /v1 前缀）
   models:
+    - id: deepseek-v4-flash
+      name: DeepSeek V4 Flash
+      context_window: 1000000
+      max_output_tokens: 384000
+      capabilities:
+        - chat
+        - reasoning
+      input_price: 0.14
+      output_price: 0.28
+      cached_input_price: 0.0028
     - id: gemini-2.5-flash-image
       name: Gemini 2.5 Flash Image
       context_window: 32000
