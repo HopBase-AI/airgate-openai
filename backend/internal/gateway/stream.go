@@ -85,10 +85,22 @@ func handleStreamResponse(resp *http.Response, w http.ResponseWriter, start time
 }
 
 func handleStreamResponseWithLogger(logger *slog.Logger, resp *http.Response, w http.ResponseWriter, start time.Time, reqServiceTier string) (sdk.ForwardOutcome, error) {
-	return handleStreamResponseWithKeepAlive(logger, resp, w, start, reqServiceTier, responseStreamKeepAliveInterval)
+	return handleStreamResponseWithOptions(logger, resp, w, start, reqServiceTier, streamResponseOptions{})
+}
+
+type streamResponseOptions struct {
+	suppressChatUsage bool
+}
+
+func handleStreamResponseWithOptions(logger *slog.Logger, resp *http.Response, w http.ResponseWriter, start time.Time, reqServiceTier string, options streamResponseOptions) (sdk.ForwardOutcome, error) {
+	return handleStreamResponseWithKeepAliveOptions(logger, resp, w, start, reqServiceTier, responseStreamKeepAliveInterval, options)
 }
 
 func handleStreamResponseWithKeepAlive(logger *slog.Logger, resp *http.Response, w http.ResponseWriter, start time.Time, reqServiceTier string, keepAliveInterval time.Duration) (sdk.ForwardOutcome, error) {
+	return handleStreamResponseWithKeepAliveOptions(logger, resp, w, start, reqServiceTier, keepAliveInterval, streamResponseOptions{})
+}
+
+func handleStreamResponseWithKeepAliveOptions(logger *slog.Logger, resp *http.Response, w http.ResponseWriter, start time.Time, reqServiceTier string, keepAliveInterval time.Duration, options streamResponseOptions) (sdk.ForwardOutcome, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -116,9 +128,16 @@ func handleStreamResponseWithKeepAlive(logger *slog.Logger, resp *http.Response,
 	var pending strings.Builder
 	var toolImageIn, toolImageOut int // 接收 response.tool_usage.image_gen，用于图像工具计费。
 	imageGenCounter := newImageGenCallCounter()
+	suppressUsageDelimiter := false
 
 	for scanner.Scan() {
 		line := scanner.Text()
+		if suppressUsageDelimiter {
+			suppressUsageDelimiter = false
+			if strings.TrimSpace(line) == "" {
+				continue
+			}
+		}
 		diagnostics.observeLine(line)
 		data, ok := extractSSEData(line)
 		if ok {
@@ -160,9 +179,14 @@ func handleStreamResponseWithKeepAlive(logger *slog.Logger, resp *http.Response,
 		}
 
 		lineForClient := line
+		dropForClient := false
 		if ok && data != "" && data != "[DONE]" {
-			if patched := normalizeResponsesImageGenerationSSEData(data); patched != data {
-				lineForClient = "data: " + patched
+			clientData := normalizeResponsesImageGenerationSSEData(data)
+			if options.suppressChatUsage {
+				clientData, dropForClient = suppressChatStreamUsageForClient(clientData)
+			}
+			if clientData != data {
+				lineForClient = "data: " + clientData
 			}
 		}
 
@@ -182,6 +206,10 @@ func handleStreamResponseWithKeepAlive(logger *slog.Logger, resp *http.Response,
 			firstTokenRecorded = true
 		}
 		parseSSEUsage([]byte(data), usage, &toolImageIn, &toolImageOut)
+		if dropForClient {
+			suppressUsageDelimiter = true
+			continue
+		}
 		if !streamStarted && diagnostics.hasOutput() {
 			keepAlive.Stop()
 		}
@@ -252,6 +280,22 @@ func handleStreamResponseWithKeepAlive(logger *slog.Logger, resp *http.Response,
 		Usage:    usage,
 		Duration: elapsed,
 	}, nil
+}
+
+func suppressChatStreamUsageForClient(data string) (string, bool) {
+	usage := gjson.Get(data, "usage")
+	if !usage.Exists() || usage.Type == gjson.Null {
+		return data, false
+	}
+	choices := gjson.Get(data, "choices")
+	if choices.IsArray() && len(choices.Array()) == 0 {
+		return "", true
+	}
+	patched, err := sjson.Delete(data, "usage")
+	if err != nil {
+		return data, false
+	}
+	return patched, false
 }
 
 func usageWithImageTool(usage *sdk.Usage, numImages int, size string, imageInputTokens, imageOutputTokens int) *sdk.Usage {

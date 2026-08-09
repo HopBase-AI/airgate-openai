@@ -234,6 +234,14 @@ func (g *OpenAIGateway) forwardAPIKey(ctx context.Context, req *sdk.ForwardReque
 
 	reqMethod, reqPath := resolveAPIKeyRoute(req)
 	targetURL := buildAPIKeyURL(account, reqPath)
+	// Chat 上游只有收到 include_usage 才保证返回计费 token；客户端未订阅时，
+	// 仍向上游请求 usage，但在回包阶段隐藏额外的 usage chunk。
+	chatStream := req.Stream && isChatCompletionsPath(reqPath)
+	clientWantsChatStreamUsage := false
+	if chatStream {
+		clientWantsChatStreamUsage = gjson.GetBytes(req.Body, "stream_options.include_usage").Bool()
+		req.Body = ensureUpstreamChatStreamUsage(req.Body)
+	}
 	if strings.HasSuffix(reqPath, "/chat/completions") &&
 		isGeminiModel(firstNonEmptyString(req.Model, gjson.GetBytes(req.Body, "model").String())) {
 		// 中继会静默丢弃 video_url 分段导致模型幻觉，统一改写成实测可用的 image_url。
@@ -547,13 +555,34 @@ func (g *OpenAIGateway) forwardAPIKey(ctx context.Context, req *sdk.ForwardReque
 	}
 
 	if req.Stream && req.Writer != nil {
-		outcome, streamErr := handleStreamResponseWithLogger(logger, resp, req.Writer, start, reqServiceTier)
+		options := streamResponseOptions{
+			suppressChatUsage: chatStream && !clientWantsChatStreamUsage,
+		}
+		outcome, streamErr := handleStreamResponseWithOptions(logger, resp, req.Writer, start, reqServiceTier, options)
 		attachUpstreamTimings(&outcome, pluginPreMs, upstreamTTFBMs)
 		return outcome, streamErr
 	}
 	outcome, dispatchErr := handleNonStreamResponse(resp, req.Writer, start, reqServiceTier)
 	attachUpstreamTimings(&outcome, pluginPreMs, upstreamTTFBMs)
 	return outcome, dispatchErr
+}
+
+func isChatCompletionsPath(path string) bool {
+	if query := strings.IndexByte(path, '?'); query >= 0 {
+		path = path[:query]
+	}
+	return strings.HasSuffix(path, "/chat/completions")
+}
+
+func ensureUpstreamChatStreamUsage(body []byte) []byte {
+	if len(body) == 0 || !gjson.ValidBytes(body) {
+		return body
+	}
+	patched, err := sjson.SetBytes(body, "stream_options.include_usage", true)
+	if err != nil {
+		return body
+	}
+	return patched
 }
 
 // attachUpstreamTimings 把 TTFT 分段耗时写入 Usage.Metadata（无 Usage 时跳过）。
