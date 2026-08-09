@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -20,10 +21,13 @@ const responseStreamKeepAliveInterval = 10 * time.Second
 const responseStreamKeepAliveComment = ": hopbase-keepalive\n\n"
 
 type ssePingKeepAlive struct {
-	w      http.ResponseWriter
-	cancel context.CancelFunc
-	done   chan struct{}
-	wrote  atomic.Bool
+	w       http.ResponseWriter
+	cancel  context.CancelFunc
+	done    chan struct{}
+	wrote   atomic.Bool
+	errMu   sync.RWMutex
+	err     error
+	onError func(error)
 }
 
 // synchronizedResponseWriter serializes heartbeat and upstream SSE writes.
@@ -60,9 +64,12 @@ type sseCommentKeepAlive struct {
 	done     chan struct{}
 	stop     chan struct{}
 	stopOnce sync.Once
+	errMu    sync.RWMutex
+	err      error
+	onError  func(error)
 }
 
-func startSSECommentKeepAlive(w http.ResponseWriter, interval time.Duration) *sseCommentKeepAlive {
+func startSSECommentKeepAlive(w http.ResponseWriter, interval time.Duration, onError ...func(error)) *sseCommentKeepAlive {
 	if w == nil || interval <= 0 {
 		return nil
 	}
@@ -71,6 +78,9 @@ func startSSECommentKeepAlive(w http.ResponseWriter, interval time.Duration) *ss
 		interval: interval,
 		done:     make(chan struct{}),
 		stop:     make(chan struct{}),
+	}
+	if len(onError) > 0 {
+		ka.onError = onError[0]
 	}
 	go ka.run()
 	return ka
@@ -85,7 +95,8 @@ func (ka *sseCommentKeepAlive) run() {
 		case <-ka.stop:
 			return
 		case <-ticker.C:
-			if _, err := ka.w.Write([]byte(responseStreamKeepAliveComment)); err != nil {
+			if err := writeResponsePayload(ka.w, []byte(responseStreamKeepAliveComment)); err != nil {
+				ka.setError(newDownstreamWriteError(err))
 				return
 			}
 			flushResponseWriter(ka.w)
@@ -101,11 +112,37 @@ func (ka *sseCommentKeepAlive) Stop() {
 	<-ka.done
 }
 
-func startSSEPingKeepAlive(w http.ResponseWriter) *ssePingKeepAlive {
-	return startSSEPingKeepAliveWithInterval(w, imageKeepAliveInterval)
+func (ka *sseCommentKeepAlive) Err() error {
+	if ka == nil {
+		return nil
+	}
+	ka.errMu.RLock()
+	defer ka.errMu.RUnlock()
+	return ka.err
 }
 
-func startSSEPingKeepAliveWithInterval(w http.ResponseWriter, interval time.Duration) *ssePingKeepAlive {
+func (ka *sseCommentKeepAlive) setError(err error) {
+	if ka == nil || err == nil {
+		return
+	}
+	ka.errMu.Lock()
+	if ka.err != nil {
+		ka.errMu.Unlock()
+		return
+	}
+	ka.err = err
+	onError := ka.onError
+	ka.errMu.Unlock()
+	if onError != nil {
+		onError(err)
+	}
+}
+
+func startSSEPingKeepAlive(w http.ResponseWriter, onError ...func(error)) *ssePingKeepAlive {
+	return startSSEPingKeepAliveWithInterval(w, imageKeepAliveInterval, onError...)
+}
+
+func startSSEPingKeepAliveWithInterval(w http.ResponseWriter, interval time.Duration, onError ...func(error)) *ssePingKeepAlive {
 	if w == nil {
 		return nil
 	}
@@ -117,6 +154,9 @@ func startSSEPingKeepAliveWithInterval(w http.ResponseWriter, interval time.Dura
 
 	ctx, cancel := context.WithCancel(context.Background())
 	ka := &ssePingKeepAlive{w: w, cancel: cancel, done: make(chan struct{})}
+	if len(onError) > 0 {
+		ka.onError = onError[0]
+	}
 	go func() {
 		defer close(ka.done)
 		t := time.NewTicker(interval)
@@ -126,8 +166,11 @@ func startSSEPingKeepAliveWithInterval(w http.ResponseWriter, interval time.Dura
 			case <-ctx.Done():
 				return
 			case <-t.C:
+				if err := writeSSEPing(w); err != nil {
+					ka.setError(newDownstreamWriteError(err))
+					return
+				}
 				ka.wrote.Store(true)
-				writeSSEPing(w)
 			}
 		}
 	}()
@@ -142,6 +185,14 @@ func (ka *ssePingKeepAlive) Stop() {
 	<-ka.done
 }
 
+func stopSSEPingKeepAlive(ka *ssePingKeepAlive) error {
+	if ka == nil {
+		return nil
+	}
+	ka.Stop()
+	return ka.Err()
+}
+
 func (ka *ssePingKeepAlive) Wrote() bool {
 	if ka == nil {
 		return false
@@ -149,30 +200,80 @@ func (ka *ssePingKeepAlive) Wrote() bool {
 	return ka.wrote.Load()
 }
 
-func writeSSEPing(w http.ResponseWriter) {
-	_, _ = w.Write([]byte(responseStreamKeepAliveComment))
-	if f, ok := w.(http.Flusher); ok {
-		f.Flush()
+func (ka *ssePingKeepAlive) Err() error {
+	if ka == nil {
+		return nil
+	}
+	ka.errMu.RLock()
+	defer ka.errMu.RUnlock()
+	return ka.err
+}
+
+func (ka *ssePingKeepAlive) setError(err error) {
+	if ka == nil || err == nil {
+		return
+	}
+	ka.errMu.Lock()
+	if ka.err != nil {
+		ka.errMu.Unlock()
+		return
+	}
+	ka.err = err
+	onError := ka.onError
+	ka.errMu.Unlock()
+	if onError != nil {
+		onError(err)
 	}
 }
 
-func writeSSEData(w http.ResponseWriter, data []byte) {
-	_, _ = w.Write([]byte("data: "))
-	_, _ = w.Write(data)
-	_, _ = w.Write([]byte("\n\n"))
+func writeResponsePayload(w http.ResponseWriter, payload []byte) error {
+	if w == nil {
+		return io.ErrClosedPipe
+	}
+	n, err := w.Write(payload)
+	if err == nil && n != len(payload) {
+		err = io.ErrShortWrite
+	}
+	return err
+}
+
+func writeSSEPing(w http.ResponseWriter) error {
+	if err := writeResponsePayload(w, []byte(responseStreamKeepAliveComment)); err != nil {
+		return err
+	}
 	if f, ok := w.(http.Flusher); ok {
 		f.Flush()
 	}
+	return nil
 }
 
-func writeSSEDone(w http.ResponseWriter) {
-	_, _ = w.Write([]byte("data: [DONE]\n\n"))
+func writeSSEData(w http.ResponseWriter, data []byte) error {
+	if err := writeResponsePayload(w, []byte("data: ")); err != nil {
+		return err
+	}
+	if err := writeResponsePayload(w, data); err != nil {
+		return err
+	}
+	if err := writeResponsePayload(w, []byte("\n\n")); err != nil {
+		return err
+	}
 	if f, ok := w.(http.Flusher); ok {
 		f.Flush()
 	}
+	return nil
 }
 
-func writeSSEError(w http.ResponseWriter, message string) {
+func writeSSEDone(w http.ResponseWriter) error {
+	if err := writeResponsePayload(w, []byte("data: [DONE]\n\n")); err != nil {
+		return err
+	}
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
+	return nil
+}
+
+func writeSSEError(w http.ResponseWriter, message string) error {
 	if message != imageTooLargeSSEErrorMessage {
 		message = sanitizedImageSSEErrorMessage
 	}
@@ -182,11 +283,15 @@ func writeSSEError(w http.ResponseWriter, message string) {
 			"type":    "server_error",
 		},
 	})
-	writeSSEData(w, errEvent)
-	writeSSEDone(w)
+	if err := writeSSEData(w, errEvent); err != nil {
+		return err
+	}
+	return writeSSEDone(w)
 }
 
-func writeImagesRESTSSE(w http.ResponseWriter, body []byte) {
-	writeSSEData(w, body)
-	writeSSEDone(w)
+func writeImagesRESTSSE(w http.ResponseWriter, body []byte) error {
+	if err := writeSSEData(w, body); err != nil {
+		return err
+	}
+	return writeSSEDone(w)
 }

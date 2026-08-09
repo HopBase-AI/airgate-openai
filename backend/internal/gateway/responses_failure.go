@@ -245,7 +245,7 @@ func classifyResponsesError(errType, errCode, msg string) *responsesFailureError
 		}
 	case isOverloadedText(strings.Join([]string{errType, errCode, msg}, " ")):
 		return &responsesFailureError{
-			Kind:               responsesFailureKindRateLimited,
+			Kind:               responsesFailureKindServer,
 			StatusCode:         http.StatusServiceUnavailable,
 			AnthropicErrorType: "overloaded_error",
 			Message:            msg,

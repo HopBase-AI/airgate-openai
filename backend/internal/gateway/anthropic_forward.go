@@ -595,7 +595,7 @@ func (g *OpenAIGateway) writeAnthropicUpstreamError(
 	if retryAfter <= 0 && statusCode == http.StatusTooManyRequests {
 		retryAfter = parseRetryDelay(errMsg)
 	}
-	if retryAfter <= 0 && kind == sdk.OutcomeAccountRateLimited {
+	if retryAfter <= 0 && (kind == sdk.OutcomeAccountRateLimited || kind == sdk.OutcomeUpstreamTransient) {
 		retryAfter = defaultRetryAfter(statusCode, errMsg)
 	}
 

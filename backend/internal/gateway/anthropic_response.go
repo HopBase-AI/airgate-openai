@@ -639,7 +639,6 @@ func translateResponsesSSEToAnthropicSSE(
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
-	w.WriteHeader(http.StatusOK)
 
 	flusher, _ := w.(http.Flusher)
 	state := &anthropicStreamState{}
@@ -654,6 +653,8 @@ func translateResponsesSSEToAnthropicSSE(
 	serviceTier := firstNonEmptyTier(requestServiceTier)
 	skipCurrentOutput := false
 	firstTokenRecorded := false
+	streamCommitted := false
+	var pending strings.Builder
 
 	for scanner.Scan() {
 		skipCurrentOutput = false
@@ -669,9 +670,10 @@ func translateResponsesSSEToAnthropicSSE(
 			continue
 		}
 
-		// 记录结构性事件
-		if data, ok := extractSSEData(string(line)); ok && data != "" && data != "[DONE]" {
-			eventType := gjson.Get(data, "type").String()
+		data, hasData := extractSSEData(string(line))
+		eventType := ""
+		if hasData && data != "" && data != "[DONE]" {
+			eventType = gjson.Get(data, "type").String()
 			if eventType != "response.output_text.delta" &&
 				eventType != "response.reasoning_summary_text.delta" &&
 				eventType != "response.function_call_arguments.delta" {
@@ -734,6 +736,28 @@ func translateResponsesSSEToAnthropicSSE(
 		if !skipCurrentOutput {
 			output = convertResponsesEventToAnthropic(line, originalRequest, state, model)
 		}
+		hasBusinessOutput := output != "" && data != "" && streamDataHasOutput(data)
+		successfulCompletion := wsEventIsSuccessfulCompletion(eventType, []byte(data))
+		if hasBusinessOutput && !firstTokenRecorded {
+			firstTokenMs = time.Since(start).Milliseconds()
+			firstTokenRecorded = true
+		}
+
+		if !streamCommitted {
+			if streamErr != nil {
+				pending.Reset()
+				goto done
+			}
+			pending.WriteString(output)
+			if !hasBusinessOutput && !successfulCompletion {
+				continue
+			}
+			output = pending.String()
+			pending.Reset()
+			w.WriteHeader(http.StatusOK)
+			streamCommitted = true
+		}
+
 		if output != "" {
 			// 大事件诊断：翻译后的单条输出超阈值时打印源 type 与长度。
 			if len(output) >= largeSSEEventThreshold {
@@ -746,12 +770,11 @@ func translateResponsesSSEToAnthropicSSE(
 					"output_bytes", len(output),
 				)
 			}
-			// 记录首 token 延迟（首次产生有效输出事件）
-			if !firstTokenRecorded {
-				firstTokenMs = time.Since(start).Milliseconds()
-				firstTokenRecorded = true
+			if err := writeResponsePayload(w, []byte(output)); err != nil {
+				streamErr = newDownstreamWriteError(fmt.Errorf("写入客户端 Anthropic SSE 失败: %w", err))
+				_ = resp.Body.Close()
+				goto done
 			}
-			_, _ = fmt.Fprint(w, output)
 			if flusher != nil {
 				flusher.Flush()
 			}
@@ -783,19 +806,24 @@ done:
 	// 即使流中断 / 上游 response.failed，中断前已产生的 token 上游也已实际计费，
 	// 仍需回传 usage 计费避免漏洞（与 forward.go WS 路径同一模式）。
 	abortUsage := func() *sdk.Usage {
-		if state.InputTokens > 0 || state.OutputTokens > 0 || state.CachedInputTokens > 0 {
+		if state.InputTokens > 0 || state.OutputTokens > 0 || state.CachedInputTokens > 0 || state.ReasoningOutputTokens > 0 {
 			fillUsageCost(usage)
 			return usage
 		}
 		return nil
 	}
 	if streamErr != nil {
+		var downstreamErr *downstreamWriteError
+		if errors.As(streamErr, &downstreamErr) {
+			return streamAbortedOutcome(streamErr, abortUsage(), elapsed), nil
+		}
 		var failure *responsesFailureError
 		if errors.As(streamErr, &failure) {
 			kind := failure.outcomeKind()
-			// 已提交的普通故障不能重放；账号限流/失效仍需保留判决，
-			// 让 Core 冷却或禁用实际故障账号。
-			if kind != sdk.OutcomeClientError && kind != sdk.OutcomeAccountRateLimited && kind != sdk.OutcomeAccountDead {
+			// 已提交的普通故障不能重放；明确 overload 仍保留账号中性的
+			// UpstreamTransient + 短 RetryAfter，Core 会根据已提交 writer 禁止重放。
+			postOutputOverload := kind == sdk.OutcomeUpstreamTransient && failure.RetryAfter > 0
+			if streamCommitted && !postOutputOverload && kind != sdk.OutcomeClientError && kind != sdk.OutcomeAccountRateLimited && kind != sdk.OutcomeAccountDead {
 				kind = sdk.OutcomeStreamAborted
 			}
 			errBody := anthropicErrorJSONWithCode(failure.AnthropicErrorType, failure.Code, failure.Message)
@@ -808,14 +836,22 @@ done:
 				Usage:      abortUsage(),
 			}, nil
 		}
+		kind := sdk.OutcomeUpstreamTransient
+		statusCode := http.StatusBadGateway
+		returnErr := streamErr
+		if streamCommitted {
+			kind = sdk.OutcomeStreamAborted
+			statusCode = http.StatusOK
+			returnErr = nil
+		}
 		errBody := anthropicErrorJSON("api_error", streamErr.Error())
 		return sdk.ForwardOutcome{
-			Kind:     sdk.OutcomeStreamAborted,
-			Upstream: sdk.UpstreamResponse{StatusCode: http.StatusBadGateway, Headers: http.Header{"Content-Type": []string{"application/json"}}, Body: errBody},
+			Kind:     kind,
+			Upstream: sdk.UpstreamResponse{StatusCode: statusCode, Headers: http.Header{"Content-Type": []string{"application/json"}}, Body: errBody},
 			Reason:   streamErr.Error(),
 			Duration: elapsed,
 			Usage:    abortUsage(),
-		}, streamErr
+		}, returnErr
 	}
 
 	fillUsageCost(usage)

@@ -290,8 +290,8 @@ func TestImageKeepAliveEmptyOverloadRemainsFailoverEligible(t *testing.T) {
 		"server_is_overloaded",
 		5*time.Second,
 	)
-	if outcome.Kind != sdk.OutcomeAccountRateLimited || !outcome.Kind.ShouldFailover() {
-		t.Fatalf("Kind = %v, want failover-eligible AccountRateLimited", outcome.Kind)
+	if outcome.Kind != sdk.OutcomeUpstreamTransient || !outcome.Kind.ShouldFailover() {
+		t.Fatalf("Kind = %v, want failover-eligible UpstreamTransient", outcome.Kind)
 	}
 	if outcome.Upstream.StatusCode != http.StatusServiceUnavailable || len(outcome.Upstream.Body) != 0 {
 		t.Fatalf("Upstream = status:%d body:%q, want empty 503", outcome.Upstream.StatusCode, outcome.Upstream.Body)
@@ -320,6 +320,53 @@ func TestStartSSEPingKeepAliveDoesNotCommitImmediately(t *testing.T) {
 	}
 	if got := w.Header().Get("Content-Type"); got != "text/event-stream" {
 		t.Fatalf("Content-Type = %q, want text/event-stream", got)
+	}
+}
+
+func TestImageKeepAliveWriteFailureSignalsCancellation(t *testing.T) {
+	canceled := make(chan error, 1)
+	ka := startSSEPingKeepAliveWithInterval(newFailingResponseWriter(1), 5*time.Millisecond, func(err error) {
+		canceled <- err
+	})
+	defer ka.Stop()
+
+	select {
+	case err := <-canceled:
+		var downstreamErr *downstreamWriteError
+		if !errors.As(err, &downstreamErr) {
+			t.Fatalf("callback error = %v, want downstreamWriteError", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("image keepalive write failure did not signal cancellation")
+	}
+	var downstreamErr *downstreamWriteError
+	if !errors.As(ka.Err(), &downstreamErr) {
+		t.Fatalf("keepalive Err = %v, want downstreamWriteError", ka.Err())
+	}
+}
+
+func TestHandleImagesResponseStreamWriteFailureIsNeutralAndKeepsUsage(t *testing.T) {
+	body := `{"created":1713833628,"model":"gpt-image-1","data":[{"b64_json":"iVBORw0"}],"usage":{"input_tokens":4,"output_tokens":2}}`
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       ioNopCloserFromString(body),
+	}
+	w := newFailingResponseWriter(1)
+	sseKA := startSSEPingKeepAlive(w)
+
+	outcome, err := handleImagesResponse(resp, w, sseKA, time.Now(), "gpt-image-1")
+	if err != nil {
+		t.Fatalf("Core-facing error = %v, want nil", err)
+	}
+	if outcome.Kind != sdk.OutcomeStreamAborted {
+		t.Fatalf("Kind = %v, want StreamAborted", outcome.Kind)
+	}
+	if outcome.Usage == nil {
+		t.Fatal("Usage = nil, want completed upstream image usage")
+	}
+	if got := usageMetricInt(outcome.Usage, usageMetricInputTokens); got != 4 {
+		t.Fatalf("input tokens = %d, want 4", got)
 	}
 }
 
@@ -2689,8 +2736,8 @@ func TestForwardImagesViaResponsesTool_KeepAliveThenOverloadStillFailsOver(t *te
 	if err == nil {
 		t.Fatal("overload error = nil, want Core-facing error for failover")
 	}
-	if outcome.Kind != sdk.OutcomeAccountRateLimited || !outcome.Kind.ShouldFailover() {
-		t.Fatalf("Kind = %v, want failover-eligible AccountRateLimited", outcome.Kind)
+	if outcome.Kind != sdk.OutcomeUpstreamTransient || !outcome.Kind.ShouldFailover() {
+		t.Fatalf("Kind = %v, want failover-eligible UpstreamTransient", outcome.Kind)
 	}
 	if outcome.Upstream.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("StatusCode = %d, want 503", outcome.Upstream.StatusCode)

@@ -110,7 +110,9 @@ func handleStreamResponseWithKeepAliveOptions(logger *slog.Logger, resp *http.Re
 	w.Header().Set("X-Accel-Buffering", "no")
 	passCodexRateLimitHeaders(resp.Header, w.Header())
 	w = &synchronizedResponseWriter{ResponseWriter: w}
-	keepAlive := startSSECommentKeepAlive(w, keepAliveInterval)
+	keepAlive := startSSECommentKeepAlive(w, keepAliveInterval, func(error) {
+		_ = resp.Body.Close()
+	})
 	defer keepAlive.Stop()
 
 	usage := newTokenUsage("", reqServiceTier, 0, 0, 0, 0, 0)
@@ -150,6 +152,8 @@ func handleStreamResponseWithKeepAliveOptions(logger *slog.Logger, resp *http.Re
 				completed = true
 				diagnostics.completionEvent = "[DONE]"
 			} else if data != "" {
+				parseSSEUsage([]byte(data), usage, &toolImageIn, &toolImageOut)
+				imageGenCounter.AddSSEData([]byte(data))
 				if streamErr = parseSSEFailureEvent([]byte(data)); streamErr != nil {
 					logStreamFailure(logger, streamErr, resp, streamStarted, diagnostics)
 					streamErrLogged = true
@@ -159,7 +163,6 @@ func handleStreamResponseWithKeepAliveOptions(logger *slog.Logger, resp *http.Re
 					}
 					break
 				}
-				imageGenCounter.AddSSEData([]byte(data))
 				if isStreamCompletionEvent(data) {
 					completed = true
 					diagnostics.completionEvent = gjson.Get(data, "type").String()
@@ -195,17 +198,17 @@ func handleStreamResponseWithKeepAliveOptions(logger *slog.Logger, resp *http.Re
 				keepAlive.Stop()
 			}
 			if err := writeOrBufferSSELine(w, resp.StatusCode, lineForClient, &pending, &streamStarted, diagnostics.hasOutput()); err != nil {
-				streamErr = fmt.Errorf("写入客户端 SSE 失败: %w", err)
+				streamErr = newDownstreamWriteError(fmt.Errorf("写入客户端 SSE 失败: %w", err))
 				clientWriteFailed = true
+				_ = resp.Body.Close()
 				break
 			}
 			continue
 		}
-		if !firstTokenRecorded {
+		if !firstTokenRecorded && diagnostics.hasOutput() {
 			usage.FirstTokenMs = time.Since(start).Milliseconds()
 			firstTokenRecorded = true
 		}
-		parseSSEUsage([]byte(data), usage, &toolImageIn, &toolImageOut)
 		if dropForClient {
 			suppressUsageDelimiter = true
 			continue
@@ -214,10 +217,16 @@ func handleStreamResponseWithKeepAliveOptions(logger *slog.Logger, resp *http.Re
 			keepAlive.Stop()
 		}
 		if err := writeOrBufferSSELine(w, resp.StatusCode, lineForClient, &pending, &streamStarted, diagnostics.hasOutput()); err != nil {
-			streamErr = fmt.Errorf("写入客户端 SSE 失败: %w", err)
+			streamErr = newDownstreamWriteError(fmt.Errorf("写入客户端 SSE 失败: %w", err))
 			clientWriteFailed = true
+			_ = resp.Body.Close()
 			break
 		}
+	}
+	keepAlive.Stop()
+	if err := keepAlive.Err(); err != nil {
+		streamErr = err
+		clientWriteFailed = true
 	}
 	if err := scanner.Err(); err != nil && streamErr == nil {
 		streamErr = fmt.Errorf("读取上游 SSE 失败: %w", err)
@@ -238,10 +247,18 @@ func handleStreamResponseWithKeepAliveOptions(logger *slog.Logger, resp *http.Re
 			logStreamFailure(logger, streamErr, resp, streamStarted, diagnostics)
 		}
 		partialUsage := usageWithImageTool(usage, imageGenCounter.Count(), imageGenCounter.Size(), toolImageIn, toolImageOut)
+		var downstreamErr *downstreamWriteError
+		if errors.As(streamErr, &downstreamErr) {
+			return streamAbortedOutcome(streamErr, partialUsage, elapsed), nil
+		}
 		var failure *responsesFailureError
 		if errors.As(streamErr, &failure) {
 			kind := failure.outcomeKind()
-			if streamStarted && kind != sdk.OutcomeClientError && kind != sdk.OutcomeAccountRateLimited && kind != sdk.OutcomeAccountDead {
+			// Preserve an explicit overload as an account-neutral transient with a
+			// short retry hint. Core already knows the response writer is committed
+			// and will not replay this request against another account.
+			postOutputOverload := kind == sdk.OutcomeUpstreamTransient && failure.RetryAfter > 0
+			if streamStarted && !postOutputOverload && kind != sdk.OutcomeClientError && kind != sdk.OutcomeAccountRateLimited && kind != sdk.OutcomeAccountDead {
 				kind = sdk.OutcomeStreamAborted
 			}
 			errBody := openAIErrorJSON(openAIErrorTypeForStatus(failure.StatusCode), string(failure.Kind), failure.Message)
@@ -299,10 +316,18 @@ func suppressChatStreamUsageForClient(data string) (string, bool) {
 }
 
 func usageWithImageTool(usage *sdk.Usage, numImages int, size string, imageInputTokens, imageOutputTokens int) *sdk.Usage {
-	if usage == nil || numImages <= 0 {
+	if usage == nil {
 		return nil
 	}
-	fillUsageCostWithImageTool(usage, imageCountForToolUsage(numImages, imageOutputTokens), size, imageInputTokens, imageOutputTokens)
+	resolvedImageCount := imageCountForToolUsage(numImages, imageOutputTokens)
+	hasTokenUsage := usageMetricValue(usage, usageMetricInputTokens) > 0 ||
+		usageMetricValue(usage, usageMetricCachedInputTokens) > 0 ||
+		usageMetricValue(usage, usageMetricOutputTokens) > 0 ||
+		usageMetricValue(usage, usageMetricReasoningOutputTokens) > 0
+	if !hasTokenUsage && resolvedImageCount <= 0 && imageInputTokens <= 0 && imageOutputTokens <= 0 {
+		return nil
+	}
+	fillUsageCostWithImageTool(usage, resolvedImageCount, size, imageInputTokens, imageOutputTokens)
 	return usage
 }
 
@@ -1013,17 +1038,21 @@ func extractSSEData(line string) (string, bool) {
 // toolImageIn/toolImageOut 可选累加器（响应 tool_usage.image_gen）。
 func parseSSEUsage(data []byte, out *sdk.Usage, toolImageIn, toolImageOut *int) {
 	eventType := gjson.GetBytes(data, "type").String()
+	if response := gjson.GetBytes(data, "response"); response.Exists() {
+		if model := response.Get("model").String(); model != "" {
+			out.Model = model
+			setUsageModelAttribute(out, model)
+		}
+		if usageServiceTier(out) == "" {
+			setUsageServiceTier(out, response.Get("service_tier").String())
+		}
+	}
 
 	switch eventType {
-	case "response.completed", "response.done":
+	case "response.completed", "response.done", "response.failed":
 		resp := gjson.GetBytes(data, "response")
 		if !resp.Exists() {
 			return
-		}
-		out.Model = resp.Get("model").String()
-		setUsageModelAttribute(out, out.Model)
-		if usageServiceTier(out) == "" {
-			setUsageServiceTier(out, resp.Get("service_tier").String())
 		}
 		usage := resp.Get("usage")
 		if usage.Exists() {

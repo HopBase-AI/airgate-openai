@@ -188,13 +188,18 @@ func (g *OpenAIGateway) forwardImagesViaWebReverse(ctx context.Context, req *sdk
 	}
 	client := imgen.NewClient(accessToken, proxyURL)
 
+	generateCtx, generateCancel := context.WithCancel(ctx)
+	defer generateCancel()
 	var sseKA *ssePingKeepAlive
 	if req.Stream {
-		sseKA = startSSEPingKeepAlive(req.Writer)
+		sseKA = startSSEPingKeepAlive(req.Writer, func(error) { generateCancel() })
 	}
 
 	prompt := applyWebReverseSizeHint(imgReq.Prompt, imgReq.Size)
-	imgRes, err := client.GenerateImage(ctx, prompt, imageInputs)
+	imgRes, err := client.GenerateImage(generateCtx, prompt, imageInputs)
+	if downstreamErr := stopSSEPingKeepAlive(sseKA); downstreamErr != nil {
+		return streamAbortedOutcome(downstreamErr, nil, time.Since(start)), nil
+	}
 	if err != nil {
 		if imgRes == nil || len(imgRes.Images) == 0 {
 			status := classifyWebReverseError(err)
@@ -223,12 +228,6 @@ func (g *OpenAIGateway) forwardImagesViaWebReverse(ctx context.Context, req *sdk
 		"num_images", numImages,
 	)
 
-	respBody := buildWebReverseImagesResponse(imgRes, 0, 0)
-	if sseKA != nil {
-		sseKA.Stop()
-		writeImagesRESTSSE(req.Writer, respBody)
-	}
-
 	elapsed := time.Since(start)
 	usage := newTokenUsage(imagesWebReverseModel, "", 0, 0, 0, 0, elapsed.Milliseconds())
 	// Web 逆向上游不返 size 字段，直接解码生成的 PNG header 拿真实宽高（O(1)）。
@@ -248,7 +247,12 @@ func (g *OpenAIGateway) forwardImagesViaWebReverse(ctx context.Context, req *sdk
 		Usage:    usage,
 		Duration: elapsed,
 	}
+	respBody := buildWebReverseImagesResponse(imgRes, 0, 0)
 	if sseKA != nil {
+		if err := writeImagesRESTSSE(req.Writer, respBody); err != nil {
+			downstreamErr := newDownstreamWriteError(fmt.Errorf("写入客户端 Images SSE 失败: %w", err))
+			return streamAbortedOutcome(downstreamErr, usage, elapsed), nil
+		}
 		outcome.Upstream.Headers = http.Header{"Content-Type": []string{"text/event-stream"}}
 	} else {
 		outcome.Upstream.Body = respBody

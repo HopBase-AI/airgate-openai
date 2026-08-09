@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -24,6 +25,54 @@ type failingResponseWriter struct {
 	header http.Header
 	failAt int
 	writes int
+}
+
+type partialFailingResponseWriter struct {
+	header http.Header
+	limit  int
+}
+
+func newPartialFailingResponseWriter(limit int) *partialFailingResponseWriter {
+	return &partialFailingResponseWriter{header: http.Header{}, limit: limit}
+}
+
+func (w *partialFailingResponseWriter) Header() http.Header { return w.header }
+func (w *partialFailingResponseWriter) WriteHeader(int)     {}
+func (w *partialFailingResponseWriter) Write(p []byte) (int, error) {
+	n := w.limit
+	if n > len(p) {
+		n = len(p)
+	}
+	return n, errTestDownstreamWrite
+}
+
+type trackingReadCloser struct {
+	io.Reader
+	closed bool
+}
+
+func (r *trackingReadCloser) Close() error {
+	r.closed = true
+	return nil
+}
+
+type blockingReadCloser struct {
+	closed chan struct{}
+	once   sync.Once
+}
+
+func newBlockingReadCloser() *blockingReadCloser {
+	return &blockingReadCloser{closed: make(chan struct{})}
+}
+
+func (r *blockingReadCloser) Read([]byte) (int, error) {
+	<-r.closed
+	return 0, io.ErrClosedPipe
+}
+
+func (r *blockingReadCloser) Close() error {
+	r.once.Do(func() { close(r.closed) })
+	return nil
 }
 
 func newFailingResponseWriter(failAt int) *failingResponseWriter {
@@ -113,8 +162,8 @@ func waitGatewayTestWebSocket(t *testing.T, result <-chan error) {
 
 func TestFailureOutcomeProductionOverloadUsesShortRetry(t *testing.T) {
 	outcome := failureOutcome(http.StatusServiceUnavailable, nil, nil, productionOverloadMessage, 0)
-	if outcome.Kind != sdk.OutcomeAccountRateLimited {
-		t.Fatalf("Kind = %v, want AccountRateLimited", outcome.Kind)
+	if outcome.Kind != sdk.OutcomeUpstreamTransient {
+		t.Fatalf("Kind = %v, want UpstreamTransient", outcome.Kind)
 	}
 	if outcome.RetryAfter != 5*time.Second {
 		t.Fatalf("RetryAfter = %v, want 5s", outcome.RetryAfter)
@@ -123,11 +172,29 @@ func TestFailureOutcomeProductionOverloadUsesShortRetry(t *testing.T) {
 
 func TestFailureOutcome529UsesShortRetry(t *testing.T) {
 	outcome := failureOutcome(529, nil, nil, "Please try again later.", 0)
-	if outcome.Kind != sdk.OutcomeAccountRateLimited {
-		t.Fatalf("Kind = %v, want AccountRateLimited", outcome.Kind)
+	if outcome.Kind != sdk.OutcomeUpstreamTransient {
+		t.Fatalf("Kind = %v, want UpstreamTransient", outcome.Kind)
 	}
 	if outcome.RetryAfter != 5*time.Second {
 		t.Fatalf("RetryAfter = %v, want 5s", outcome.RetryAfter)
+	}
+}
+
+func TestFailureOutcome504IsAccountNeutralAndNotReplayable(t *testing.T) {
+	body := []byte(`{"error":{"message":"gateway timeout"}}`)
+	outcome := failureOutcome(http.StatusGatewayTimeout, body, http.Header{"Content-Type": []string{"application/json"}}, "gateway timeout", 0)
+
+	if outcome.Kind != sdk.OutcomeClientError {
+		t.Fatalf("Kind = %v, want ClientError", outcome.Kind)
+	}
+	if outcome.Upstream.StatusCode != http.StatusGatewayTimeout {
+		t.Fatalf("StatusCode = %d, want 504", outcome.Upstream.StatusCode)
+	}
+	if outcome.Kind.IsAccountFault() || outcome.Kind.ShouldFailover() {
+		t.Fatalf("504 verdict must be account-neutral and non-failover: %v", outcome.Kind)
+	}
+	if err := forwardErrForOutcome(outcome, errors.New("upstream gateway timeout")); err != nil {
+		t.Fatalf("Core-facing error = %v, want nil passthrough", err)
 	}
 }
 
@@ -157,7 +224,7 @@ func TestExtractRetryAfterHeaderFormats(t *testing.T) {
 	}
 }
 
-func TestHandleStreamResponsePostOutputOverloadRemainsRateLimited(t *testing.T) {
+func TestHandleStreamResponsePostOutputOverloadRemainsTransient(t *testing.T) {
 	body := strings.Join([]string{
 		`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.6-sol"}}`,
 		"",
@@ -177,14 +244,57 @@ func TestHandleStreamResponsePostOutputOverloadRemainsRateLimited(t *testing.T) 
 	if err != nil {
 		t.Fatalf("handleStreamResponse error: %v", err)
 	}
-	if outcome.Kind != sdk.OutcomeAccountRateLimited {
-		t.Fatalf("Kind = %v, want AccountRateLimited", outcome.Kind)
+	if outcome.Kind != sdk.OutcomeUpstreamTransient {
+		t.Fatalf("Kind = %v, want UpstreamTransient", outcome.Kind)
 	}
 	if outcome.RetryAfter != 5*time.Second {
 		t.Fatalf("RetryAfter = %v, want 5s", outcome.RetryAfter)
 	}
 	if !strings.Contains(w.Body.String(), "visible output") {
 		t.Fatalf("business output was not forwarded: %q", w.Body.String())
+	}
+}
+
+func TestHandleStreamResponsePostOutputFailurePreservesResponsesUsage(t *testing.T) {
+	body := strings.Join([]string{
+		`data: {"type":"response.created","response":{"id":"resp_usage","model":"gpt-5.6-sol"}}`,
+		"",
+		`data: {"type":"response.output_text.delta","delta":"visible output"}`,
+		"",
+		`data: {"type":"response.failed","response":{"id":"resp_usage","model":"gpt-5.6-sol","usage":{"input_tokens":12,"output_tokens":5,"input_tokens_details":{"cached_tokens":2},"output_tokens_details":{"reasoning_tokens":3}},"error":{"type":"service_unavailable_error","code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later."}}}`,
+		"",
+	}, "\n")
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       io.NopCloser(strings.NewReader(body)),
+	}
+	w := httptest.NewRecorder()
+
+	outcome, err := handleStreamResponse(resp, w, time.Now(), "")
+	if err != nil {
+		t.Fatalf("handleStreamResponse error: %v", err)
+	}
+	if outcome.Kind != sdk.OutcomeUpstreamTransient || outcome.RetryAfter != 5*time.Second {
+		t.Fatalf("outcome = kind:%v retry:%v, want UpstreamTransient/5s", outcome.Kind, outcome.RetryAfter)
+	}
+	if outcome.Usage == nil {
+		t.Fatal("Usage = nil, want response.failed.response.usage")
+	}
+	if got := usageMetricInt(outcome.Usage, usageMetricInputTokens); got != 10 {
+		t.Fatalf("input tokens = %d, want 10 uncached", got)
+	}
+	if got := usageMetricInt(outcome.Usage, usageMetricCachedInputTokens); got != 2 {
+		t.Fatalf("cached input tokens = %d, want 2", got)
+	}
+	if got := usageMetricInt(outcome.Usage, usageMetricOutputTokens); got != 5 {
+		t.Fatalf("output tokens = %d, want 5", got)
+	}
+	if got := usageMetricInt(outcome.Usage, usageMetricReasoningOutputTokens); got != 3 {
+		t.Fatalf("reasoning tokens = %d, want 3", got)
+	}
+	if outcome.Usage.Model != "gpt-5.6-sol" {
+		t.Fatalf("usage model = %q, want gpt-5.6-sol", outcome.Usage.Model)
 	}
 }
 
@@ -263,8 +373,8 @@ func TestOAuthWSPreludeOverloadDoesNotCommitClientResponse(t *testing.T) {
 			t.Fatalf("pre-output failure committed client response: wrote=%v body=%q", handler.wrote, w.Body.String())
 		}
 		failure := classifyOAuthWSFailure(result.Err, handler.wrote)
-		if failure.kind != sdk.OutcomeAccountRateLimited {
-			t.Fatalf("Kind = %v, want AccountRateLimited", failure.kind)
+		if failure.kind != sdk.OutcomeUpstreamTransient {
+			t.Fatalf("Kind = %v, want UpstreamTransient", failure.kind)
 		}
 		if failure.retryAfter != 5*time.Second {
 			t.Fatalf("RetryAfter = %v, want 5s", failure.retryAfter)
@@ -287,13 +397,55 @@ func TestOAuthWSPreludeOverloadDoesNotCommitClientResponse(t *testing.T) {
 			t.Fatalf("pre-output failure committed chat stream: wrote=%v body=%q", handler.wrote, w.Body.String())
 		}
 		failure := classifyOAuthWSFailure(result.Err, handler.wrote)
-		if failure.kind != sdk.OutcomeAccountRateLimited || failure.retryAfter != 5*time.Second {
-			t.Fatalf("failure = %+v, want AccountRateLimited with 5s retry", failure)
+		if failure.kind != sdk.OutcomeUpstreamTransient || failure.retryAfter != 5*time.Second {
+			t.Fatalf("failure = %+v, want UpstreamTransient with 5s retry", failure)
 		}
 	})
 }
 
-func TestOAuthWSPostOutputOverloadRemainsRateLimited(t *testing.T) {
+func TestOAuthWSClientErrorsReturnNilGoErrorWithoutCommitting(t *testing.T) {
+	tests := []struct {
+		name  string
+		event string
+	}{
+		{
+			name:  "context length",
+			event: `{"type":"response.failed","response":{"error":{"type":"invalid_request_error","code":"context_length_exceeded","message":"Your input exceeds the context window of this model."}}}`,
+		},
+		{
+			name:  "unsupported model",
+			event: `{"type":"error","error":{"type":"invalid_request_error","code":"model_not_supported","message":"The requested model is not supported."}}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			conn, serverResult := dialGatewayTestWebSocket(t, func(conn *websocket.Conn) error {
+				return writeGatewayTestEvents(conn, tt.event)
+			})
+			w := httptest.NewRecorder()
+			handler := &sseEventWriter{w: w, start: time.Now()}
+			result := ReceiveWSResponse(context.Background(), conn, handler)
+			waitGatewayTestWebSocket(t, serverResult)
+
+			if result.Err == nil {
+				t.Fatal("result.Err = nil, want classified client failure")
+			}
+			if handler.wrote || w.Body.Len() != 0 {
+				t.Fatalf("client error committed stream: wrote=%v body=%q", handler.wrote, w.Body.String())
+			}
+			failure := classifyOAuthWSFailure(result.Err, handler.wrote)
+			if failure.kind != sdk.OutcomeClientError || failure.statusCode != http.StatusBadRequest {
+				t.Fatalf("failure = %+v, want ClientError/400", failure)
+			}
+			if err := forwardErrorForOAuthWSFailure(result.Err, false, failure.kind, nil); err != nil {
+				t.Fatalf("Core-facing error = %v, want nil so original 400 is returned without account retry", err)
+			}
+		})
+	}
+}
+
+func TestOAuthWSPostOutputOverloadRemainsTransient(t *testing.T) {
 	conn, serverResult := dialGatewayTestWebSocket(t, func(conn *websocket.Conn) error {
 		return writeGatewayTestEvents(conn,
 			`{"type":"response.created","response":{"id":"resp_1","model":"gpt-5.6-sol"}}`,
@@ -310,8 +462,8 @@ func TestOAuthWSPostOutputOverloadRemainsRateLimited(t *testing.T) {
 		t.Fatalf("business output was not committed: wrote=%v body=%q", handler.wrote, w.Body.String())
 	}
 	failure := classifyOAuthWSFailure(result.Err, handler.wrote)
-	if failure.kind != sdk.OutcomeAccountRateLimited {
-		t.Fatalf("Kind = %v, want AccountRateLimited", failure.kind)
+	if failure.kind != sdk.OutcomeUpstreamTransient {
+		t.Fatalf("Kind = %v, want UpstreamTransient", failure.kind)
 	}
 	if failure.retryAfter != 5*time.Second {
 		t.Fatalf("RetryAfter = %v, want 5s", failure.retryAfter)
@@ -425,6 +577,83 @@ func TestReceiveWSResponseReturnsDownstreamWriteErrorAndStopsReading(t *testing.
 	}
 	if err := forwardErrorForOAuthWSFailure(result.Err, writer.wrote, sdk.OutcomeStreamAborted, nil); err != nil {
 		t.Fatalf("Core-facing error = %v, want nil to prevent failover", err)
+	}
+}
+
+func TestHandleStreamResponseDownstreamWriteFailureIsNeutralAndClosesUpstream(t *testing.T) {
+	writers := []struct {
+		name string
+		w    http.ResponseWriter
+	}{
+		{name: "zero byte", w: newFailingResponseWriter(1)},
+		{name: "partial", w: newPartialFailingResponseWriter(7)},
+	}
+
+	for _, tt := range writers {
+		t.Run(tt.name, func(t *testing.T) {
+			body := &trackingReadCloser{Reader: strings.NewReader(strings.Join([]string{
+				`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.6-sol"}}`,
+				"",
+				`data: {"type":"response.output_text.delta","delta":"visible"}`,
+				"",
+				`data: {"type":"response.output_text.delta","delta":"must not be forwarded"}`,
+				"",
+			}, "\n"))}
+			resp := &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+				Body:       body,
+			}
+
+			outcome, err := handleStreamResponse(resp, tt.w, time.Now(), "")
+			if err != nil {
+				t.Fatalf("Core-facing error = %v, want nil", err)
+			}
+			if outcome.Kind != sdk.OutcomeStreamAborted {
+				t.Fatalf("Kind = %v, want StreamAborted", outcome.Kind)
+			}
+			if !body.closed {
+				t.Fatal("upstream body was not closed after downstream write failure")
+			}
+			if !strings.Contains(outcome.Reason, errTestDownstreamWrite.Error()) {
+				t.Fatalf("Reason = %q, want downstream write error", outcome.Reason)
+			}
+		})
+	}
+}
+
+func TestHandleStreamResponseKeepAliveFailureCancelsBlockedUpstream(t *testing.T) {
+	body := newBlockingReadCloser()
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       body,
+	}
+	type result struct {
+		outcome sdk.ForwardOutcome
+		err     error
+	}
+	resultCh := make(chan result, 1)
+	go func() {
+		outcome, err := handleStreamResponseWithKeepAlive(nil, resp, newFailingResponseWriter(1), time.Now(), "", 5*time.Millisecond)
+		resultCh <- result{outcome: outcome, err: err}
+	}()
+
+	select {
+	case got := <-resultCh:
+		if got.err != nil {
+			t.Fatalf("Core-facing error = %v, want nil", got.err)
+		}
+		if got.outcome.Kind != sdk.OutcomeStreamAborted {
+			t.Fatalf("Kind = %v, want StreamAborted", got.outcome.Kind)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("keepalive write failure did not stop the blocked upstream read")
+	}
+	select {
+	case <-body.closed:
+	default:
+		t.Fatal("blocked upstream body was not closed")
 	}
 }
 

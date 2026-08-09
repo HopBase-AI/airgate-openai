@@ -131,7 +131,9 @@ func TestClassifyHTTPFailureProductionErrorMatrix(t *testing.T) {
 		{"401 invalid credential", 401, "invalid token", sdk.OutcomeAccountDead},
 		{"502 relay failure", 502, "error code: 502", sdk.OutcomeUpstreamTransient},
 		{"503 temporary outage", 503, "Service temporarily unavailable", sdk.OutcomeUpstreamTransient},
-		{"503 explicit overload", 503, "server_is_overloaded", sdk.OutcomeAccountRateLimited},
+		{"503 explicit overload", 503, "server_is_overloaded", sdk.OutcomeUpstreamTransient},
+		{"529 provider overload", 529, "overloaded", sdk.OutcomeUpstreamTransient},
+		{"504 timeout is not replayable", 504, "server_is_overloaded", sdk.OutcomeClientError},
 		{"400 invalid request", 400, "invalid request payload", sdk.OutcomeClientError},
 		{"404 model unavailable", 404, "model_not_found", sdk.OutcomeClientError},
 		{"419 nonstandard client response", 419, "session expired", sdk.OutcomeClientError},
@@ -156,9 +158,9 @@ func TestClassifyResponsesFailureProductionSSEMatrix(t *testing.T) {
 		wantRetryAfter time.Duration
 	}{
 		{
-			name:           "server overloaded is retryable rate limit",
+			name:           "server overloaded is account neutral transient",
 			raw:            `{"type":"response.failed","response":{"error":{"type":"service_unavailable_error","code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later."}}}`,
-			want:           sdk.OutcomeAccountRateLimited,
+			want:           sdk.OutcomeUpstreamTransient,
 			wantRetryAfter: 5 * time.Second,
 		},
 		{

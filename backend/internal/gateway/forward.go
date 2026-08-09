@@ -233,6 +233,12 @@ func (g *OpenAIGateway) forwardAPIKey(ctx context.Context, req *sdk.ForwardReque
 	logger := sdk.LoggerFromContext(ctx)
 
 	reqMethod, reqPath := resolveAPIKeyRoute(req)
+	requestCtx := ctx
+	requestCancel := func() {}
+	if isImagesRequest(reqPath) && req.Stream {
+		requestCtx, requestCancel = context.WithCancel(ctx)
+	}
+	defer requestCancel()
 	targetURL := buildAPIKeyURL(account, reqPath)
 	// TokenHub 的 DeepSeek Flash Chat 流只有收到 include_usage 才保证返回计费 token；
 	// 客户端未订阅时，仍向上游请求 usage，但在回包阶段隐藏额外的 usage。
@@ -362,7 +368,7 @@ func (g *OpenAIGateway) forwardAPIKey(ctx context.Context, req *sdk.ForwardReque
 		bodyReader = bytes.NewReader(req.Body)
 	}
 
-	upstreamReq, err := http.NewRequestWithContext(ctx, reqMethod, targetURL, bodyReader)
+	upstreamReq, err := http.NewRequestWithContext(requestCtx, reqMethod, targetURL, bodyReader)
 	if err != nil {
 		reason := fmt.Sprintf("构建上游请求失败: %v", err)
 		logger.Warn("upstream_request_build_failed",
@@ -394,7 +400,7 @@ func (g *OpenAIGateway) forwardAPIKey(ctx context.Context, req *sdk.ForwardReque
 				sdk.LogFieldAccountID, account.ID,
 				"upstream_task_id", recoveryID,
 			)
-			finalBody, pollErr := g.pollAsyncImageTask(ctx, account, recoveryID, logger)
+			finalBody, pollErr := g.pollAsyncImageTask(requestCtx, account, recoveryID, logger)
 			if pollErr == nil {
 				mockResp := &http.Response{
 					StatusCode: http.StatusOK,
@@ -414,7 +420,7 @@ func (g *OpenAIGateway) forwardAPIKey(ctx context.Context, req *sdk.ForwardReque
 
 	var sseKA *ssePingKeepAlive
 	if isImagesRequest(reqPath) && req.Stream {
-		sseKA = startSSEPingKeepAlive(req.Writer)
+		sseKA = startSSEPingKeepAlive(req.Writer, func(error) { requestCancel() })
 	}
 
 	logger.Debug("upstream_request_start",
@@ -430,14 +436,16 @@ func (g *OpenAIGateway) forwardAPIKey(ctx context.Context, req *sdk.ForwardReque
 	// 仅真正的 SSE token 流走"无总超时 + 首字节 + 读空闲"模型。
 	streamable := req.Stream && req.Writer != nil && !isImagesRequest(reqPath)
 	doStart := time.Now()
-	resp, cancel, err := g.doStreamableUpstream(ctx, upstreamReq, account, streamable)
+	resp, cancel, err := g.doStreamableUpstream(requestCtx, upstreamReq, account, streamable)
 	// TTFT 分段埋点：plugin_pre = 进入 forward → 发起上游；upstream_ttfb = 发起 → 响应头到达
 	pluginPreMs := doStart.Sub(start).Milliseconds()
 	upstreamTTFBMs := time.Since(doStart).Milliseconds()
 	if err != nil {
 		dur := time.Since(start)
 		if sseKA != nil {
-			sseKA.Stop()
+			if downstreamErr := stopSSEPingKeepAlive(sseKA); downstreamErr != nil {
+				return streamAbortedOutcome(downstreamErr, nil, dur), nil
+			}
 			logger.Warn("images_apikey_stream_failed_redacted",
 				sdk.LogFieldPath, reqPath,
 				sdk.LogFieldModel, req.Model,
@@ -465,7 +473,9 @@ func (g *OpenAIGateway) forwardAPIKey(ctx context.Context, req *sdk.ForwardReque
 		}
 		dur := time.Since(start)
 		if sseKA != nil {
-			sseKA.Stop()
+			if downstreamErr := stopSSEPingKeepAlive(sseKA); downstreamErr != nil {
+				return streamAbortedOutcome(downstreamErr, nil, dur), nil
+			}
 			logger.Warn("images_apikey_upstream_error_redacted",
 				sdk.LogFieldPath, reqPath,
 				sdk.LogFieldModel, req.Model,
@@ -512,7 +522,9 @@ func (g *OpenAIGateway) forwardAPIKey(ctx context.Context, req *sdk.ForwardReque
 		if readErr != nil {
 			reason := fmt.Sprintf("读取 Images 响应失败: %v", readErr)
 			if sseKA != nil {
-				sseKA.Stop()
+				if downstreamErr := stopSSEPingKeepAlive(sseKA); downstreamErr != nil {
+					return streamAbortedOutcome(downstreamErr, nil, time.Since(start)), nil
+				}
 			}
 			return transientOutcome(reason), fmt.Errorf("%s", reason)
 		}
@@ -532,7 +544,7 @@ func (g *OpenAIGateway) forwardAPIKey(ctx context.Context, req *sdk.ForwardReque
 				}
 			}
 
-			finalBody, pollErr := g.pollAsyncImageTask(ctx, account, taskID, logger)
+			finalBody, pollErr := g.pollAsyncImageTask(requestCtx, account, taskID, logger)
 			if pollErr != nil {
 				reason := fmt.Sprintf("异步图片任务轮询失败: %v", pollErr)
 				logger.Warn("images_async_task_poll_failed",
@@ -542,7 +554,9 @@ func (g *OpenAIGateway) forwardAPIKey(ctx context.Context, req *sdk.ForwardReque
 					sdk.LogFieldError, pollErr,
 				)
 				if sseKA != nil {
-					sseKA.Stop()
+					if downstreamErr := stopSSEPingKeepAlive(sseKA); downstreamErr != nil {
+						return streamAbortedOutcome(downstreamErr, nil, time.Since(start)), nil
+					}
 				}
 				return transientOutcome(reason), fmt.Errorf("%s", reason)
 			}
@@ -698,10 +712,11 @@ func classifyOAuthWSFailure(err error, streamOutputStarted bool) oauthWSFailureD
 	}
 
 	// Once business output is visible, ordinary upstream failures are stream
-	// aborts and must never be replayed. Explicit account overload remains a
-	// rate-limit verdict so the scheduler can cool down that credential; Core
-	// independently prevents replay after the application response is committed.
-	if streamOutputStarted && details.kind != sdk.OutcomeClientError && details.kind != sdk.OutcomeAccountRateLimited && details.kind != sdk.OutcomeAccountDead {
+	// aborts and must never be replayed. Explicit overload remains an
+	// account-neutral transient with a short retry hint; Core independently
+	// prevents replay after the application response is committed.
+	postOutputOverload := details.kind == sdk.OutcomeUpstreamTransient && details.retryAfter > 0
+	if streamOutputStarted && !postOutputOverload && details.kind != sdk.OutcomeClientError && details.kind != sdk.OutcomeAccountRateLimited && details.kind != sdk.OutcomeAccountDead {
 		details.kind = sdk.OutcomeStreamAborted
 	}
 	return details
@@ -712,10 +727,15 @@ func forwardErrorForOAuthWSFailure(err error, streamOutputStarted bool, kind sdk
 	if errors.As(err, &downstreamErr) {
 		return nil
 	}
-	// A committed overload must still cool down the account, but keeping the Go
-	// error would make Core record a zero-cost plugin failure and discard Usage.
-	// The same applies to any post-output abort carrying billable partial usage.
-	if streamOutputStarted && (kind == sdk.OutcomeAccountRateLimited || kind == sdk.OutcomeAccountDead || usage != nil) {
+	// Client errors belong to the request, not the selected credential. Returning
+	// a Go error would make Core retry every account before replacing the original
+	// 4xx with a generic all-routes failure.
+	if kind == sdk.OutcomeClientError {
+		return nil
+	}
+	// Keeping a Go error for a committed classified failure would make Core
+	// replace the already-started response and discard partial Usage.
+	if streamOutputStarted && (kind == sdk.OutcomeUpstreamTransient || kind == sdk.OutcomeAccountRateLimited || kind == sdk.OutcomeAccountDead || usage != nil) {
 		return nil
 	}
 	return err

@@ -57,7 +57,7 @@ func successOutcome(statusCode int, body []byte, headers http.Header, usage *sdk
 // 会原样保留 Upstream（Body / Headers / StatusCode）供 Core 在 ClientError 路径下透传。
 func failureOutcome(statusCode int, body []byte, headers http.Header, message string, retryAfter time.Duration) sdk.ForwardOutcome {
 	kind := classifyHTTPFailure(statusCode, message)
-	if kind == sdk.OutcomeAccountRateLimited && retryAfter <= 0 {
+	if retryAfter <= 0 && (kind == sdk.OutcomeAccountRateLimited || kind == sdk.OutcomeUpstreamTransient) {
 		retryAfter = defaultRetryAfter(statusCode, message)
 	}
 	reason := message
@@ -111,6 +111,23 @@ func transientOutcome(reason string) sdk.ForwardOutcome {
 		Kind:     sdk.OutcomeUpstreamTransient,
 		Upstream: sdk.UpstreamResponse{StatusCode: http.StatusBadGateway},
 		Reason:   reason,
+	}
+}
+
+// streamAbortedOutcome reports a downstream/client-side stream failure without
+// blaming the selected upstream account. Any usage already reported upstream is
+// retained so Core can settle work that was completed before the disconnect.
+func streamAbortedOutcome(err error, usage *sdk.Usage, duration time.Duration) sdk.ForwardOutcome {
+	reason := "响应流已中断"
+	if err != nil {
+		reason = err.Error()
+	}
+	return sdk.ForwardOutcome{
+		Kind:     sdk.OutcomeStreamAborted,
+		Upstream: sdk.UpstreamResponse{StatusCode: http.StatusOK},
+		Reason:   reason,
+		Usage:    usage,
+		Duration: duration,
 	}
 }
 

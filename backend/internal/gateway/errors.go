@@ -24,17 +24,25 @@ import (
 //	401 / 403 → AccountDead（附加消息关键词检查"usage limit" / "rate limit" 等会降级为 RateLimited）
 //	400 + 消息含限流关键词 → AccountRateLimited（部分上游用 400 返回 usage_limit_reached）
 //	400 + 消息含 disabled/deactivated → AccountDead
-//	529 / 明确 overload 的 5xx → AccountRateLimited；其它 5xx → UpstreamTransient
+//	504 → ClientError（SDK 暂无账号中性的不可重放 5xx，借此保留原始 504）
+//	529 / 明确 overload 的 5xx → UpstreamTransient（短暂上游容量故障，不处罚账号）
+//	其它 5xx → UpstreamTransient
 //	其它 4xx → ClientError（客户端请求自己的问题，账号无辜）
 func classifyHTTPFailure(statusCode int, message string) sdk.OutcomeKind {
+	// A gateway timeout has an unknown execution result and must not be replayed
+	// against another account. OutcomeClientError is the SDK's current
+	// account-neutral, non-failover passthrough verdict.
+	if statusCode == http.StatusGatewayTimeout {
+		return sdk.OutcomeClientError
+	}
 	if isTemporaryRateLimitText(message) && (statusCode == 400 || statusCode == 403 || statusCode == 429) {
 		return sdk.OutcomeAccountRateLimited
 	}
 	if statusCode == 529 {
-		return sdk.OutcomeAccountRateLimited
+		return sdk.OutcomeUpstreamTransient
 	}
 	if statusCode >= 500 && isOverloadedText(message) {
-		return sdk.OutcomeAccountRateLimited
+		return sdk.OutcomeUpstreamTransient
 	}
 	if isDisabledAccountText(message) && (statusCode == 400 || statusCode == 403) {
 		return sdk.OutcomeAccountDead
