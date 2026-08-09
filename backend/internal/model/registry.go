@@ -108,6 +108,19 @@ func withLongCtx(s Spec) Spec {
 	return s
 }
 
+// deepSeekFlash 构造 TokenHub DeepSeek V4 Flash 的标准价。
+// 该上游没有 priority/flex 档，不能使用 std() 自动派生不存在的价格。
+func deepSeekFlash(name string) Spec {
+	return Spec{
+		Name:            name,
+		ContextWindow:   1_000_000,
+		MaxOutputTokens: 384_000,
+		InputPrice:      0.14705882352941177,
+		CachedPrice:     0.02941176470588235,
+		OutputPrice:     0.29411764705882354,
+	}
+}
+
 // registry 内置模型注册表（按模型 ID 索引），运行时可被后台模型目录覆盖层叠加。
 // ─── 新增模型只需在此处加一行 ───
 //
@@ -156,16 +169,10 @@ var registry = map[string]Spec{
 	// ¥6.8/$ 换算为精确美元值。生产分组的 5.644 倍（83 折）由 Core 配置，
 	// 不在这里重复相乘。这样缓存价也保持 TokenHub 的 1:5 比例，避免沿用
 	// 上游公开价的 1:50 缓存折扣而低收费用。
-	// 1M 上下文、最大输出 384K；deepseek-v4-flash 现指向 V4-Flash-0731 公测版。
-	// 不用 std()：DeepSeek 没有 priority/flex 档，std 会凭空造出 ×2/×0.5 档价。
-	"deepseek-v4-flash": {
-		Name:            "DeepSeek V4 Flash",
-		ContextWindow:   1_000_000,
-		MaxOutputTokens: 384_000,
-		InputPrice:      0.14705882352941177,
-		CachedPrice:     0.02941176470588235,
-		OutputPrice:     0.29411764705882354,
-	},
+	// TokenHub 当前同时公开滚动别名和固定正式版 ID；两者均为 1M 上下文、
+	// 最大输出 384K，并已分别通过 Chat Completions 与 Responses 实测。
+	"deepseek-v4-flash":        deepSeekFlash("DeepSeek V4 Flash"),
+	"deepseek-v4-flash-202605": deepSeekFlash("DeepSeek V4 Flash 202605"),
 }
 
 // DefaultSpec 未注册模型的最终兜底值。按 gpt-5.4 标准档计价——宁可略高也不能 0。
