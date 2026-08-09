@@ -13,32 +13,41 @@ import (
 	sdk "github.com/DouDOU-start/airgate-sdk/sdkgo"
 )
 
-func TestForwardAPIKeyChatStreamAlwaysRequestsUsage(t *testing.T) {
+func TestForwardAPIKeyDeepSeekChatStreamAlwaysRequestsUsage(t *testing.T) {
 	tests := []struct {
 		name              string
+		requestModel      string
 		body              string
 		wantClientUsage   bool
 		preservedJSONPath string
 		preservedValue    string
 	}{
 		{
-			name: "absent",
-			body: `{"model":"deepseek-v4-flash-202605","messages":[{"role":"user","content":"hi"}],"stream":true}`,
+			name:         "absent",
+			requestModel: "deepseek-v4-flash-202605",
+			body:         `{"model":"deepseek-v4-flash-202605","messages":[{"role":"user","content":"hi"}],"stream":true}`,
 		},
 		{
-			name: "explicit false",
-			body: `{"model":"deepseek-v4-flash-202605","messages":[{"role":"user","content":"hi"}],"stream":true,"stream_options":{"include_usage":false}}`,
+			name:         "explicit false",
+			requestModel: "deepseek-v4-flash-202605",
+			body:         `{"model":"deepseek-v4-flash-202605","messages":[{"role":"user","content":"hi"}],"stream":true,"stream_options":{"include_usage":false}}`,
 		},
 		{
 			name:            "explicit true",
+			requestModel:    "deepseek-v4-flash-202605",
 			body:            `{"model":"deepseek-v4-flash-202605","messages":[{"role":"user","content":"hi"}],"stream":true,"stream_options":{"include_usage":true}}`,
 			wantClientUsage: true,
 		},
 		{
 			name:              "preserves other stream options",
+			requestModel:      "deepseek-v4-flash-202605",
 			body:              `{"model":"deepseek-v4-flash-202605","messages":[{"role":"user","content":"hi"}],"stream":true,"stream_options":{"vendor_trace":"keep"}}`,
 			preservedJSONPath: "stream_options.vendor_trace",
 			preservedValue:    "keep",
+		},
+		{
+			name: "unversioned model from body",
+			body: `{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"hi"}],"stream":true}`,
 		},
 	}
 
@@ -61,7 +70,7 @@ func TestForwardAPIKeyChatStreamAlwaysRequestsUsage(t *testing.T) {
 					"api_key":  "test-key",
 					"base_url": server.URL,
 				}},
-				Model:  "deepseek-v4-flash-202605",
+				Model:  tt.requestModel,
 				Stream: true,
 				Writer: writer,
 				Headers: http.Header{
@@ -109,6 +118,107 @@ func TestForwardAPIKeyChatStreamAlwaysRequestsUsage(t *testing.T) {
 			assertDeepSeekChatUsage(t, outcome.Usage)
 		})
 	}
+}
+
+func TestForwardAPIKeyNonDeepSeekChatStreamLeavesBodyUnchanged(t *testing.T) {
+	originalBody := []byte("{\n  \"model\": \"gpt-5.4\",\n  \"messages\": [{\"role\": \"user\", \"content\": \"hi\"}],\n  \"stream\": true,\n  \"stream_options\": {\"include_usage\": false, \"vendor_trace\": \"keep\"}\n}")
+	requestBody := make(chan []byte, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		requestBody <- body
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, nonDeepSeekChatStream)
+	}))
+	defer server.Close()
+
+	writer := httptest.NewRecorder()
+	gateway := &OpenAIGateway{transportPool: NewTransportPool()}
+	defer gateway.transportPool.CloseIdle()
+	request := &sdk.ForwardRequest{
+		Account: &sdk.Account{Credentials: map[string]string{
+			"api_key":  "test-key",
+			"base_url": server.URL,
+		}},
+		Model:  "gpt-5.4",
+		Stream: true,
+		Writer: writer,
+		Headers: http.Header{
+			"Content-Type":       []string{"application/json"},
+			"X-Forwarded-Method": []string{http.MethodPost},
+			"X-Forwarded-Path":   []string{"/v1/chat/completions"},
+		},
+		Body: append([]byte(nil), originalBody...),
+	}
+
+	outcome, err := gateway.forwardAPIKey(context.Background(), request, "")
+	if err != nil {
+		t.Fatalf("forwardAPIKey() error = %v", err)
+	}
+	if outcome.Kind != sdk.OutcomeSuccess {
+		t.Fatalf("outcome kind = %v, want success; reason=%s", outcome.Kind, outcome.Reason)
+	}
+	if upstreamBody := <-requestBody; string(upstreamBody) != string(originalBody) {
+		t.Fatalf("non-DeepSeek request body changed:\n got: %q\nwant: %q", upstreamBody, originalBody)
+	}
+	if string(request.Body) != string(originalBody) {
+		t.Fatalf("ForwardRequest body changed:\n got: %q\nwant: %q", request.Body, originalBody)
+	}
+	if writer.Body.String() != nonDeepSeekChatStream {
+		t.Fatalf("client stream changed:\n got: %q\nwant: %q", writer.Body.String(), nonDeepSeekChatStream)
+	}
+}
+
+func TestForwardAPIKeyDeepSeekChatStreamKeepsFinishChunkWhenSuppressingEmbeddedUsage(t *testing.T) {
+	requestBody := make(chan []byte, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		requestBody <- body
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, chatStreamWithEmbeddedUsage)
+	}))
+	defer server.Close()
+
+	writer := httptest.NewRecorder()
+	gateway := &OpenAIGateway{transportPool: NewTransportPool()}
+	defer gateway.transportPool.CloseIdle()
+	request := &sdk.ForwardRequest{
+		Account: &sdk.Account{Credentials: map[string]string{
+			"api_key":  "test-key",
+			"base_url": server.URL,
+		}},
+		Model:  "deepseek-v4-flash",
+		Stream: true,
+		Writer: writer,
+		Headers: http.Header{
+			"Content-Type":       []string{"application/json"},
+			"X-Forwarded-Method": []string{http.MethodPost},
+			"X-Forwarded-Path":   []string{"/v1/chat/completions"},
+		},
+		Body: []byte(`{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"hi"}],"stream":true}`),
+	}
+
+	outcome, err := gateway.forwardAPIKey(context.Background(), request, "")
+	if err != nil {
+		t.Fatalf("forwardAPIKey() error = %v", err)
+	}
+	if outcome.Kind != sdk.OutcomeSuccess {
+		t.Fatalf("outcome kind = %v, want success; reason=%s", outcome.Kind, outcome.Reason)
+	}
+	if upstreamBody := <-requestBody; !gjson.GetBytes(upstreamBody, "stream_options.include_usage").Bool() {
+		t.Fatalf("upstream include_usage = false; body=%s", upstreamBody)
+	}
+
+	clientBody := writer.Body.String()
+	if clientBody != chatStreamWithEmbeddedUsageSuppressed {
+		t.Fatalf("client stream changed:\n got: %q\nwant: %q", clientBody, chatStreamWithEmbeddedUsageSuppressed)
+	}
+	if strings.Contains(clientBody, `"usage"`) {
+		t.Fatalf("client stream leaked injected usage: %s", clientBody)
+	}
+	if !strings.Contains(clientBody, `"finish_reason":"stop"`) || !strings.Contains(clientBody, "data: [DONE]") {
+		t.Fatalf("client stream lost finish chunk: %s", clientBody)
+	}
+	assertDeepSeekChatUsageForModel(t, outcome.Usage, "deepseek-v4-flash")
 }
 
 func TestForwardAPIKeyResponsesStreamDoesNotInjectChatStreamOptions(t *testing.T) {
@@ -167,12 +277,16 @@ func TestForwardAPIKeyResponsesStreamDoesNotInjectChatStreamOptions(t *testing.T
 }
 
 func assertDeepSeekChatUsage(t *testing.T, usage *sdk.Usage) {
+	assertDeepSeekChatUsageForModel(t, usage, "deepseek-v4-flash-202605")
+}
+
+func assertDeepSeekChatUsageForModel(t *testing.T, usage *sdk.Usage, wantModel string) {
 	t.Helper()
 	if usage == nil {
 		t.Fatal("usage = nil")
 	}
-	if usage.Model != "deepseek-v4-flash-202605" {
-		t.Fatalf("usage model = %q", usage.Model)
+	if usage.Model != wantModel {
+		t.Fatalf("usage model = %q, want %q", usage.Model, wantModel)
 	}
 	checks := map[string]int{
 		usageMetricInputTokens:           75,
@@ -200,3 +314,18 @@ const chatUsageChunk = `data: {"id":"chatcmpl_test","object":"chat.completion.ch
 
 const chatStreamWithoutUsage = chatStreamPrefix + "data: [DONE]\n\n"
 const chatStreamWithUsage = chatStreamPrefix + chatUsageChunk + "data: [DONE]\n\n"
+
+const nonDeepSeekChatStream = "" +
+	`data: {"id":"chatcmpl_gpt","object":"chat.completion.chunk","model":"gpt-5.4","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":null}]}` + "\n\n" +
+	`data: {"id":"chatcmpl_gpt","object":"chat.completion.chunk","model":"gpt-5.4","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":1,"total_tokens":6}}` + "\n\n" +
+	"data: [DONE]\n\n"
+
+const chatStreamWithEmbeddedUsage = "" +
+	`data: {"id":"chatcmpl_formal","object":"chat.completion.chunk","model":"deepseek-v4-flash","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":null}]}` + "\n\n" +
+	`data: {"id":"chatcmpl_formal","object":"chat.completion.chunk","model":"deepseek-v4-flash","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":88,"completion_tokens":8,"total_tokens":96,"prompt_tokens_details":{"cached_tokens":13},"completion_tokens_details":{"reasoning_tokens":3}}}` + "\n\n" +
+	"data: [DONE]\n\n"
+
+const chatStreamWithEmbeddedUsageSuppressed = "" +
+	`data: {"id":"chatcmpl_formal","object":"chat.completion.chunk","model":"deepseek-v4-flash","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":null}]}` + "\n\n" +
+	`data: {"id":"chatcmpl_formal","object":"chat.completion.chunk","model":"deepseek-v4-flash","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}` + "\n\n" +
+	"data: [DONE]\n\n"

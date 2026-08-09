@@ -234,9 +234,11 @@ func (g *OpenAIGateway) forwardAPIKey(ctx context.Context, req *sdk.ForwardReque
 
 	reqMethod, reqPath := resolveAPIKeyRoute(req)
 	targetURL := buildAPIKeyURL(account, reqPath)
-	// Chat 上游只有收到 include_usage 才保证返回计费 token；客户端未订阅时，
-	// 仍向上游请求 usage，但在回包阶段隐藏额外的 usage chunk。
-	chatStream := req.Stream && isChatCompletionsPath(reqPath)
+	// TokenHub 的 DeepSeek Flash Chat 流只有收到 include_usage 才保证返回计费 token；
+	// 客户端未订阅时，仍向上游请求 usage，但在回包阶段隐藏额外的 usage。
+	chatStream := req.Stream &&
+		isChatCompletionsPath(reqPath) &&
+		isDeepSeekFlashModel(firstNonEmptyString(req.Model, gjson.GetBytes(req.Body, "model").String()))
 	clientWantsChatStreamUsage := false
 	if chatStream {
 		clientWantsChatStreamUsage = gjson.GetBytes(req.Body, "stream_options.include_usage").Bool()
@@ -572,6 +574,15 @@ func isChatCompletionsPath(path string) bool {
 		path = path[:query]
 	}
 	return strings.HasSuffix(path, "/chat/completions")
+}
+
+func isDeepSeekFlashModel(modelID string) bool {
+	switch strings.TrimSpace(modelID) {
+	case "deepseek-v4-flash", "deepseek-v4-flash-202605":
+		return true
+	default:
+		return false
+	}
 }
 
 func ensureUpstreamChatStreamUsage(body []byte) []byte {
