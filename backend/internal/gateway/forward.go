@@ -40,6 +40,20 @@ func redactURL(rawURL string) string {
 
 // forwardHTTP 根据账号凭证类型分发到不同转发模式
 func (g *OpenAIGateway) forwardHTTP(ctx context.Context, req *sdk.ForwardRequest) (sdk.ForwardOutcome, error) {
+	requestedModel := firstNonEmptyString(req.Model, gjson.GetBytes(req.Body, "model").String())
+	if model.IsRetired(requestedModel) {
+		message := "模型 " + strings.TrimSpace(requestedModel) + " 未启用，请使用 deepseek-v4-flash"
+		return sdk.ForwardOutcome{
+			Kind: sdk.OutcomeClientError,
+			Upstream: sdk.UpstreamResponse{
+				StatusCode: http.StatusBadRequest,
+				Headers:    http.Header{"Content-Type": []string{"application/json"}},
+				Body:       jsonError(message),
+			},
+			Reason: message,
+		}, nil
+	}
+
 	if isAnthropicCountTokensRequest(req) {
 		return g.forwardAnthropicCountTokens(ctx, req)
 	}
@@ -587,6 +601,8 @@ func isChatCompletionsPath(path string) bool {
 }
 
 func isDeepSeekFlashModel(modelID string) bool {
+	// The retired alias is rejected in forwardHTTP. Keep recognizing it here so
+	// any internal caller that bypasses the public entry still requests usage.
 	switch strings.TrimSpace(modelID) {
 	case "deepseek-v4-flash", "deepseek-v4-flash-202605":
 		return true

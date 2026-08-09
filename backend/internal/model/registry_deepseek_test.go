@@ -5,29 +5,31 @@ import "testing"
 // TestDeepSeekV4Flash TokenHub 基础价与元数据。
 // TokenHub 价为 ¥1/¥0.2/¥2（每 1M tokens），按 ¥6.8/$ 换算为下列美元值。
 func TestDeepSeekV4Flash(t *testing.T) {
-	for _, id := range []string{"deepseek-v4-flash", "deepseek-v4-flash-202605"} {
-		spec, registered := registry[id]
-		if !registered {
-			t.Fatalf("%s 未显式注册", id)
-		}
-		if spec.InputPrice != 0.14705882352941177 ||
-			spec.CachedPrice != 0.02941176470588235 ||
-			spec.OutputPrice != 0.29411764705882354 {
-			t.Fatalf("%s 价格 = %v/%v/%v", id, spec.InputPrice, spec.CachedPrice, spec.OutputPrice)
-		}
-		if spec.ContextWindow != 1_000_000 || spec.MaxOutputTokens != 384_000 {
-			t.Fatalf("%s 上下文 = %d/%d", id, spec.ContextWindow, spec.MaxOutputTokens)
-		}
-		// DeepSeek 没有 priority/flex 档,不得凭空造档价
-		if spec.InputPricePriority != 0 || spec.InputPriceFlex != 0 {
-			t.Fatalf("%s 不应有 priority/flex 档价: %+v", id, spec)
-		}
-		if v := vendorForModel(id); v != "deepseek" {
-			t.Fatalf("%s vendor = %q", id, v)
-		}
-		if s := seriesForModel(id); s != "deepseek-v4" {
-			t.Fatalf("%s series = %q", id, s)
-		}
+	const id = "deepseek-v4-flash"
+	spec, registered := registry[id]
+	if !registered {
+		t.Fatalf("%s 未显式注册", id)
+	}
+	if spec.InputPrice != 0.14705882352941177 ||
+		spec.CachedPrice != 0.02941176470588235 ||
+		spec.OutputPrice != 0.29411764705882354 {
+		t.Fatalf("%s 价格 = %v/%v/%v", id, spec.InputPrice, spec.CachedPrice, spec.OutputPrice)
+	}
+	if spec.ContextWindow != 1_000_000 || spec.MaxOutputTokens != 384_000 {
+		t.Fatalf("%s 上下文 = %d/%d", id, spec.ContextWindow, spec.MaxOutputTokens)
+	}
+	// DeepSeek 没有 priority/flex 档,不得凭空造档价
+	if spec.InputPricePriority != 0 || spec.InputPriceFlex != 0 {
+		t.Fatalf("%s 不应有 priority/flex 档价: %+v", id, spec)
+	}
+	if v := vendorForModel(id); v != "deepseek" {
+		t.Fatalf("%s vendor = %q", id, v)
+	}
+	if s := seriesForModel(id); s != "deepseek-v4" {
+		t.Fatalf("%s series = %q", id, s)
+	}
+	if _, registered := registry["deepseek-v4-flash-202605"]; registered {
+		t.Fatal("未经 TokenHub 配置证明的 deepseek-v4-flash-202605 不应注册")
 	}
 }
 

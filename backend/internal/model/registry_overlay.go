@@ -19,6 +19,18 @@ type catalogOverlay struct {
 
 var overlayStore atomic.Pointer[catalogOverlay]
 
+// IsRetired reports model IDs that must not be restored by a stale Core catalog.
+// These IDs remain recognizable to the gateway so requests can fail closed before
+// reaching an unintended upstream route.
+func IsRetired(modelID string) bool {
+	switch normalizeID(modelID) {
+	case "deepseek-v4-flash-202605":
+		return true
+	default:
+		return false
+	}
+}
+
 func activeRegistry() map[string]Spec {
 	if ov := overlayStore.Load(); ov != nil {
 		return ov.registry
@@ -95,7 +107,7 @@ func parseCatalogOverlay(raw string) (*catalogOverlay, error) {
 	}
 	for _, e := range entries {
 		id := normalizeID(e.ID)
-		if id == "" {
+		if id == "" || IsRetired(id) {
 			continue
 		}
 		base, ok := eff[id]
