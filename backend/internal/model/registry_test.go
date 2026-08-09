@@ -135,6 +135,23 @@ func TestCatalogOverlay_AddNewModel(t *testing.T) {
 	}
 }
 
+func TestCatalogOverlay_RetiredDeepSeekAliasCannotBeRestored(t *testing.T) {
+	const retiredID = "deepseek-v4-flash-202605"
+	withCatalogOverlay(t, `[
+	  {"id":"deepseek-v4-flash-202605","name":"Stale DeepSeek Alias",
+	   "pricing":{"input":99,"cached_input":99,"output":99}}
+	]`)
+
+	if IsKnown(retiredID) {
+		t.Fatalf("retired model %s must not be restored by catalog overlay", retiredID)
+	}
+	for _, candidate := range AllModels() {
+		if candidate.ID == retiredID {
+			t.Fatalf("retired model %s must not be exposed by AllModels", retiredID)
+		}
+	}
+}
+
 // TestCatalogOverlay_NonGPTNewModelHasNoLongContextTier 非 GPT 系列的覆盖层新增模型(如 GLM)
 // 不应继承 DefaultSpec 的 272K 长上下文阶梯——否则 >272K 请求会按 GPT 的 ×2 in/×1.5 out 错误计费。
 func TestCatalogOverlay_NonGPTNewModelHasNoLongContextTier(t *testing.T) {

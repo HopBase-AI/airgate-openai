@@ -221,6 +221,16 @@ func TestPreprocessRequestBodyMapsGLMFP8AliasForUpstream(t *testing.T) {
 	}
 }
 
+func TestPreprocessRequestBodyKeepsConfiguredDeepSeekModel(t *testing.T) {
+	body := []byte(`{"model":"deepseek-v4-flash-202605","messages":[{"role":"user","content":"hi"}]}`)
+
+	got := preprocessRequestBody(body, "deepseek-v4-flash", "/v1/chat/completions")
+
+	if model := gjson.GetBytes(got, "model").String(); model != "deepseek-v4-flash" {
+		t.Fatalf("upstream model = %q, want deepseek-v4-flash; body=%s", model, got)
+	}
+}
+
 func largeConversationImageDataURL(t *testing.T) string {
 	t.Helper()
 	img := image.NewRGBA(image.Rect(0, 0, 1024, 1024))

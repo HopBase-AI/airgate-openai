@@ -169,10 +169,9 @@ var registry = map[string]Spec{
 	// ¥6.8/$ 换算为精确美元值。生产分组的 5.644 倍（83 折）由 Core 配置，
 	// 不在这里重复相乘。这样缓存价也保持 TokenHub 的 1:5 比例，避免沿用
 	// 上游公开价的 1:50 缓存折扣而低收费用。
-	// TokenHub 当前同时公开滚动别名和固定正式版 ID；两者均为 1M 上下文、
-	// 最大输出 384K，并已分别通过 Chat Completions 与 Responses 实测。
-	"deepseek-v4-flash":        deepSeekFlash("DeepSeek V4 Flash"),
-	"deepseek-v4-flash-202605": deepSeekFlash("DeepSeek V4 Flash 202605"),
+	// 生产仅发布用户 TokenHub 实例实际配置的 deepseek-v4-flash。不要注册未经
+	// 腾讯配置证明的版本别名，避免请求误路由到未购买优惠的其它线路。
+	"deepseek-v4-flash": deepSeekFlash("DeepSeek V4 Flash"),
 }
 
 // DefaultSpec 未注册模型的最终兜底值。按 gpt-5.4 标准档计价——宁可略高也不能 0。
