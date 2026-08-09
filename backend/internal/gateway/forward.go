@@ -805,8 +805,7 @@ func (g *OpenAIGateway) forwardOAuth(ctx context.Context, req *sdk.ForwardReques
 				sdk.LogFieldReason, err.Error(),
 				"phase", "ws_handshake",
 			)
-			wsBody := openAIErrorJSON(openAIErrorTypeForStatus(wsResp.StatusCode), "", err.Error())
-			outcome := failureOutcome(wsResp.StatusCode, wsBody, wsResp.Header.Clone(), err.Error(), extractRetryAfterHeader(wsResp.Header))
+			outcome := webSocketHandshakeFailureOutcome(wsResp, err)
 			outcome.Duration = time.Since(start)
 			return outcome, forwardErrForOutcome(outcome, err)
 		}

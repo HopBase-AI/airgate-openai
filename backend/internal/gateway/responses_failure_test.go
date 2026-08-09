@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -150,6 +151,197 @@ func TestClassifyHTTPFailureProductionErrorMatrix(t *testing.T) {
 	}
 }
 
+func TestFailureOutcomeStructured429Semantics(t *testing.T) {
+	tests := []struct {
+		name           string
+		body           string
+		message        string
+		wantKind       sdk.OutcomeKind
+		wantRetryAfter time.Duration
+	}{
+		{
+			name:           "overload code is account neutral",
+			body:           `{"error":{"type":"server_error","code":"server_is_overloaded","message":"Please try again later."}}`,
+			message:        "Please try again later.",
+			wantKind:       sdk.OutcomeUpstreamTransient,
+			wantRetryAfter: 5 * time.Second,
+		},
+		{
+			name:           "credential rate limit remains account scoped",
+			body:           `{"error":{"type":"rate_limit_error","code":"rate_limit_exceeded","message":"Rate limit exceeded."}}`,
+			message:        "Rate limit exceeded.",
+			wantKind:       sdk.OutcomeAccountRateLimited,
+			wantRetryAfter: time.Minute,
+		},
+		{
+			name:           "rate limit code wins over overload prose",
+			body:           `{"error":{"type":"rate_limit_error","code":"rate_limit_exceeded","message":"The model is overloaded; retry later."}}`,
+			message:        "The model is overloaded; retry later.",
+			wantKind:       sdk.OutcomeAccountRateLimited,
+			wantRetryAfter: time.Minute,
+		},
+		{
+			name:           "overload code wins over generic rate type",
+			body:           `{"error":{"type":"rate_limit_error","code":"server_is_overloaded","message":"Please try again later."}}`,
+			message:        "Please try again later.",
+			wantKind:       sdk.OutcomeUpstreamTransient,
+			wantRetryAfter: 5 * time.Second,
+		},
+		{
+			name:           "rate limit code wins over invalid request type",
+			body:           `{"error":{"type":"invalid_request_error","code":"rate_limit_exceeded","message":"Unknown parameter: 'rate limit'."}}`,
+			message:        "Unknown parameter: 'rate limit'.",
+			wantKind:       sdk.OutcomeAccountRateLimited,
+			wantRetryAfter: time.Minute,
+		},
+		{
+			name:           "top level overload type wins over rate prose",
+			body:           `{"type":"server_is_overloaded","message":"Rate limit exceeded."}`,
+			message:        "Rate limit exceeded.",
+			wantKind:       sdk.OutcomeUpstreamTransient,
+			wantRetryAfter: 5 * time.Second,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body := []byte(tt.body)
+			outcome := failureOutcome(http.StatusTooManyRequests, body, nil, tt.message, 0)
+			if outcome.Kind != tt.wantKind {
+				t.Fatalf("Kind = %v, want %v", outcome.Kind, tt.wantKind)
+			}
+			if outcome.RetryAfter != tt.wantRetryAfter {
+				t.Fatalf("RetryAfter = %v, want %v", outcome.RetryAfter, tt.wantRetryAfter)
+			}
+			if outcome.Upstream.StatusCode != http.StatusTooManyRequests {
+				t.Fatalf("transport status = %d, want 429", outcome.Upstream.StatusCode)
+			}
+			if string(outcome.Upstream.Body) != tt.body {
+				t.Fatalf("upstream body changed: %s", outcome.Upstream.Body)
+			}
+		})
+	}
+}
+
+func TestFailureOutcomeStructuredSignalBoundaries(t *testing.T) {
+	tests := []struct {
+		name           string
+		status         int
+		body           string
+		message        string
+		wantKind       sdk.OutcomeKind
+		wantRetryAfter time.Duration
+	}{
+		{
+			name:           "403 rate limit keeps account cooldown despite overload prose",
+			status:         http.StatusForbidden,
+			body:           `{"error":{"type":"rate_limit_error","code":"rate_limit_exceeded","message":"The model is overloaded; retry later."}}`,
+			message:        "The model is overloaded; retry later.",
+			wantKind:       sdk.OutcomeAccountRateLimited,
+			wantRetryAfter: 10 * time.Minute,
+		},
+		{
+			name:     "400 invalid request mentioning overload stays client error",
+			status:   http.StatusBadRequest,
+			body:     `{"error":{"type":"invalid_request_error","code":"invalid_request","message":"The overloaded field is invalid."}}`,
+			message:  "The overloaded field is invalid.",
+			wantKind: sdk.OutcomeClientError,
+		},
+		{
+			name:     "400 unknown rate limit parameter stays client error",
+			status:   http.StatusBadRequest,
+			body:     `{"error":{"type":"invalid_request_error","code":"unknown_parameter","message":"Unknown parameter: 'rate_limit'."}}`,
+			message:  "Unknown parameter: 'rate_limit'.",
+			wantKind: sdk.OutcomeClientError,
+		},
+		{
+			name:     "400 unknown natural language rate limit parameter stays client error",
+			status:   http.StatusBadRequest,
+			body:     `{"error":{"type":"invalid_request_error","code":"unknown_parameter","message":"Unknown parameter: 'rate limit'."}}`,
+			message:  "Unknown parameter: 'rate limit'.",
+			wantKind: sdk.OutcomeClientError,
+		},
+		{
+			name:     "400 unknown usage limit parameter stays client error",
+			status:   http.StatusBadRequest,
+			body:     `{"error":{"type":"invalid_request_error","code":"unknown_parameter","message":"Unknown parameter: 'usage_limit'."}}`,
+			message:  "Unknown parameter: 'usage_limit'.",
+			wantKind: sdk.OutcomeClientError,
+		},
+		{
+			name:     "404 overload code does not override client boundary",
+			status:   http.StatusNotFound,
+			body:     `{"error":{"type":"server_error","code":"server_is_overloaded","message":"Please try again later."}}`,
+			message:  "Please try again later.",
+			wantKind: sdk.OutcomeClientError,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			outcome := failureOutcome(tt.status, []byte(tt.body), nil, tt.message, 0)
+			if outcome.Kind != tt.wantKind {
+				t.Fatalf("Kind = %v, want %v", outcome.Kind, tt.wantKind)
+			}
+			if outcome.RetryAfter != tt.wantRetryAfter {
+				t.Fatalf("RetryAfter = %v, want %v", outcome.RetryAfter, tt.wantRetryAfter)
+			}
+		})
+	}
+}
+
+func TestFailureOutcomeStructuredOverloadPreservesRetryAfter(t *testing.T) {
+	body := []byte(`{"error":{"type":"server_error","code":"server_is_overloaded","message":"Please try again later."}}`)
+	outcome := failureOutcome(http.StatusTooManyRequests, body, nil, "Please try again later.", 17*time.Second)
+	if outcome.Kind != sdk.OutcomeUpstreamTransient {
+		t.Fatalf("Kind = %v, want UpstreamTransient", outcome.Kind)
+	}
+	if outcome.RetryAfter != 17*time.Second {
+		t.Fatalf("RetryAfter = %v, want 17s", outcome.RetryAfter)
+	}
+}
+
+func TestForwardAPIKeyHTTP429StructuredOverloadIsTransient(t *testing.T) {
+	upstreamBody := `{"error":{"type":"server_error","code":"server_is_overloaded","message":"Please try again later."}}`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = io.WriteString(w, upstreamBody)
+	}))
+	defer server.Close()
+
+	gateway := &OpenAIGateway{transportPool: NewTransportPool()}
+	defer gateway.transportPool.CloseIdle()
+	outcome, err := gateway.forwardAPIKey(context.Background(), &sdk.ForwardRequest{
+		Account: &sdk.Account{ID: 56, Credentials: map[string]string{
+			"api_key":  "test-key",
+			"base_url": server.URL,
+		}},
+		Model: "gpt-5.6-sol",
+		Headers: http.Header{
+			"Content-Type":       []string{"application/json"},
+			"X-Forwarded-Method": []string{http.MethodPost},
+			"X-Forwarded-Path":   []string{"/v1/responses"},
+		},
+		Body: []byte(`{"model":"gpt-5.6-sol","input":"ping"}`),
+	}, "")
+	if err != nil {
+		t.Fatalf("forwardAPIKey() error = %v", err)
+	}
+	if outcome.Kind != sdk.OutcomeUpstreamTransient {
+		t.Fatalf("Kind = %v, want UpstreamTransient", outcome.Kind)
+	}
+	if outcome.Kind.IsAccountFault() {
+		t.Fatalf("overload must not penalize the selected account: %v", outcome.Kind)
+	}
+	if outcome.Upstream.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("transport status = %d, want 429", outcome.Upstream.StatusCode)
+	}
+	if outcome.RetryAfter != 5*time.Second {
+		t.Fatalf("RetryAfter = %v, want 5s", outcome.RetryAfter)
+	}
+}
+
 func TestClassifyResponsesFailureProductionSSEMatrix(t *testing.T) {
 	tests := []struct {
 		name           string
@@ -162,6 +354,27 @@ func TestClassifyResponsesFailureProductionSSEMatrix(t *testing.T) {
 			raw:            `{"type":"response.failed","response":{"error":{"type":"service_unavailable_error","code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later."}}}`,
 			want:           sdk.OutcomeUpstreamTransient,
 			wantRetryAfter: 5 * time.Second,
+		},
+		{
+			name: "rate limit code wins over overload prose",
+			raw:  `{"type":"response.failed","response":{"error":{"type":"rate_limit_error","code":"rate_limit_exceeded","message":"The model is overloaded; retry later."}}}`,
+			want: sdk.OutcomeAccountRateLimited,
+		},
+		{
+			name:           "overload code wins over rate limit type and prose",
+			raw:            `{"type":"response.failed","response":{"error":{"type":"rate_limit_error","code":"server_is_overloaded","message":"Rate limit exceeded."}}}`,
+			want:           sdk.OutcomeUpstreamTransient,
+			wantRetryAfter: 5 * time.Second,
+		},
+		{
+			name: "rate limit code wins over invalid request type",
+			raw:  `{"type":"response.failed","response":{"error":{"type":"invalid_request_error","code":"rate_limit_exceeded","message":"The overloaded field is invalid."}}}`,
+			want: sdk.OutcomeAccountRateLimited,
+		},
+		{
+			name: "rate limit type wins over overload prose",
+			raw:  `{"type":"response.failed","response":{"error":{"type":"rate_limit_error","message":"The model is overloaded; retry later."}}}`,
+			want: sdk.OutcomeAccountRateLimited,
 		},
 		{
 			name: "generic upstream error is transient",
@@ -188,6 +401,42 @@ func TestClassifyResponsesFailureProductionSSEMatrix(t *testing.T) {
 			}
 			if failure.RetryAfter != tt.wantRetryAfter {
 				t.Fatalf("RetryAfter = %v, want %v", failure.RetryAfter, tt.wantRetryAfter)
+			}
+		})
+	}
+}
+
+func TestClassifyWSErrorEventMachineSignalPriority(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want responsesFailureKind
+	}{
+		{
+			name: "rate limit code wins over overload prose",
+			raw:  `{"type":"error","error":{"type":"rate_limit_error","code":"rate_limit_exceeded","message":"The model is overloaded; retry later."}}`,
+			want: responsesFailureKindRateLimited,
+		},
+		{
+			name: "overload code wins over rate limit type and prose",
+			raw:  `{"type":"error","error":{"type":"rate_limit_error","code":"server_is_overloaded","message":"Rate limit exceeded."}}`,
+			want: responsesFailureKindServer,
+		},
+		{
+			name: "rate limit code wins over invalid request type",
+			raw:  `{"type":"error","error":{"type":"invalid_request_error","code":"rate_limit_exceeded","message":"The overloaded field is invalid."}}`,
+			want: responsesFailureKindRateLimited,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			failure := classifyWSErrorEvent([]byte(tt.raw))
+			if failure == nil {
+				t.Fatal("expected classified failure")
+			}
+			if failure.Kind != tt.want {
+				t.Fatalf("Kind = %q, want %q; failure=%+v", failure.Kind, tt.want, failure)
 			}
 		})
 	}

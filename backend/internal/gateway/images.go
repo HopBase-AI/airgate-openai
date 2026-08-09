@@ -1390,8 +1390,7 @@ func (g *OpenAIGateway) forwardImagesViaResponsesToolWithURL(ctx context.Context
 	conn, wsResp, err := DialWebSocket(cfg)
 	if err != nil {
 		if wsResp != nil {
-			wsBody := openAIErrorJSON(openAIErrorTypeForStatus(wsResp.StatusCode), "", err.Error())
-			outcome := failureOutcome(wsResp.StatusCode, wsBody, wsResp.Header.Clone(), err.Error(), extractRetryAfterHeader(wsResp.Header))
+			outcome := webSocketHandshakeFailureOutcome(wsResp, err)
 			outcome.Duration = time.Since(start)
 			return outcome, forwardErrForOutcome(outcome, err)
 		}
@@ -1651,7 +1650,14 @@ func buildImagesErrorBody(status int, message string) []byte {
 
 func buildImagesErrorBodyWithCode(status int, code, message string) []byte {
 	errType := "server_error"
-	if status >= 400 && status < 500 {
+	switch {
+	case status == http.StatusUnauthorized:
+		errType = "authentication_error"
+	case status == http.StatusForbidden:
+		errType = "permission_error"
+	case status == http.StatusTooManyRequests:
+		errType = "rate_limit_error"
+	case status >= 400 && status < 500:
 		errType = "invalid_request_error"
 	}
 	if code == "" {
