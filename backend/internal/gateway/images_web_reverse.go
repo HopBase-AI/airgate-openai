@@ -202,9 +202,8 @@ func (g *OpenAIGateway) forwardImagesViaWebReverse(ctx context.Context, req *sdk
 				sseKA.Stop()
 				g.logger.Warn("Images WebReverse 流式请求失败，已脱敏响应",
 					"model", imgReq.Model, "status_code", status, "error", err)
-				writeSSEErrorIfStarted(req.Writer, sseKA, sanitizedImageSSEErrorMessage)
 			}
-			outcome := failureOutcome(status, nil, nil, err.Error(), parseRetryDelay(err.Error()))
+			outcome := failureOutcome(status, nil, nil, err.Error(), webReverseRetryAfter(status, err.Error()))
 			outcome.Duration = time.Since(start)
 			if outcome.Usage == nil {
 				outcome.Usage = newTokenUsage(imagesWebReverseModel, "", 0, 0, 0, 0, 0)
@@ -297,7 +296,7 @@ func buildWebReverseImagesResponse(res *imgen.Result, promptTokens, outputTokens
 // 400 类客户端错误直接透传；账号 / 上游类错误保留 err，让 core 继续脱敏和 failover。
 func webReverseImagesError(start time.Time, status int, _ http.ResponseWriter, msg string) (sdk.ForwardOutcome, error) {
 	body := buildImagesErrorBody(status, msg)
-	outcome := failureOutcome(status, body, http.Header{"Content-Type": []string{"application/json"}}, msg, parseRetryDelay(msg))
+	outcome := failureOutcome(status, body, http.Header{"Content-Type": []string{"application/json"}}, msg, webReverseRetryAfter(status, msg))
 	outcome.Duration = time.Since(start)
 	if outcome.Usage == nil {
 		outcome.Usage = newTokenUsage(imagesWebReverseModel, "", 0, 0, 0, 0, 0)
@@ -363,28 +362,49 @@ func scaleImageDimension(value, oldEdge, newEdge int) int {
 	return int((int64(value)*int64(newEdge) + int64(oldEdge)/2) / int64(oldEdge))
 }
 
-// classifyWebReverseError 根据 err.Error() 文本判定 HTTP 状态码。
+const webReverseRiskControlRetryAfter = 30 * time.Second
+
+// classifyWebReverseError 根据 err.Error() 文本判定对 Core 暴露的 HTTP 状态码。
 //
 // imgen 底层的错误都是 fmt.Errorf("...HTTP %d: ...")，通过文本嗅探定位上游状态码。
 // 上游有时把 429 包成 502 + "rate limit reached" 文案下发，单看 "HTTP 502" 会误判，
 // 所以默认分支再用 isTemporaryRateLimitText 兜一遍，命中限流关键词就归 429。
+// 网页端 PoW / Sentinel 风控 403 是可恢复的账号级拒绝，归 429 进入短冷却；
+// 只有明确凭证失效或账号停用才归 401 并永久禁用。
 func classifyWebReverseError(err error) int {
 	if err == nil {
 		return http.StatusBadGateway
 	}
 	msg := err.Error()
 	switch {
-	case strings.Contains(msg, "HTTP 401"), strings.Contains(msg, "access_token"):
+	case strings.Contains(msg, "HTTP 401"), isDefinitiveCredentialFailureText(msg):
 		return http.StatusUnauthorized
-	case strings.Contains(msg, "HTTP 403"):
-		return http.StatusForbidden
 	case strings.Contains(msg, "HTTP 429"):
 		return http.StatusTooManyRequests
-	case strings.Contains(msg, "PoW"), strings.Contains(msg, "触发风控"):
-		return http.StatusForbidden
+	case isWebReverseRiskControlText(msg):
+		return http.StatusTooManyRequests
 	case isTemporaryRateLimitText(msg):
 		return http.StatusTooManyRequests
 	default:
 		return http.StatusBadGateway
 	}
+}
+
+func isWebReverseRiskControlText(message string) bool {
+	lower := strings.ToLower(message)
+	return strings.Contains(lower, "http 403") ||
+		strings.Contains(lower, "pow") ||
+		strings.Contains(lower, "sentinel") ||
+		strings.Contains(lower, "challenge") ||
+		strings.Contains(message, "风控")
+}
+
+func webReverseRetryAfter(status int, message string) time.Duration {
+	if retryAfter := parseRetryDelay(message); retryAfter > 0 {
+		return retryAfter
+	}
+	if status == http.StatusTooManyRequests && isWebReverseRiskControlText(message) {
+		return webReverseRiskControlRetryAfter
+	}
+	return 0
 }

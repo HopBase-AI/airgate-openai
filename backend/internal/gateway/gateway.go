@@ -535,6 +535,7 @@ func appendCodexUsageWindow(
 	base time.Time,
 	now time.Time,
 	force bool,
+	ignoreLimit bool,
 ) []accountUsageWindow {
 	if !force && usedPercent == nil && resetAfterSeconds == nil {
 		return windows
@@ -547,7 +548,7 @@ func appendCodexUsageWindow(
 	if resetAfterSeconds != nil {
 		resetAt = resetAtFromBase(base, *resetAfterSeconds)
 	}
-	return append(windows, newAccountUsageWindow(key, label, used, resetAt, now))
+	return append(windows, newAccountUsageWindow(key, label, used, resetAt, now, ignoreLimit))
 }
 
 func buildCodexUsageWindows(snapshot *CodexUsageSnapshot, limitName string, now time.Time) []accountUsageWindow {
@@ -557,10 +558,10 @@ func buildCodexUsageWindows(snapshot *CodexUsageSnapshot, limitName string, now 
 	}
 	if normalized := snapshot.Normalize(); normalized != nil {
 		windows = appendCodexUsageWindow(
-			windows, "5h", "5h", normalized.Used5hPercent, normalized.Reset5hSeconds, snapshot.CapturedAt, now, false,
+			windows, "5h", "5h", normalized.Used5hPercent, normalized.Reset5hSeconds, snapshot.CapturedAt, now, false, false,
 		)
 		windows = appendCodexUsageWindow(
-			windows, "7d", "7d", normalized.Used7dPercent, normalized.Reset7dSeconds, snapshot.CapturedAt, now, false,
+			windows, "7d", "7d", normalized.Used7dPercent, normalized.Reset7dSeconds, snapshot.CapturedAt, now, false, false,
 		)
 	}
 
@@ -618,6 +619,7 @@ func buildCodexUsageWindows(snapshot *CodexUsageSnapshot, limitName string, now 
 		snapshot.CapturedAt,
 		now,
 		forceModelWindows,
+		true,
 	)
 	windows = appendCodexUsageWindow(
 		windows,
@@ -628,6 +630,7 @@ func buildCodexUsageWindows(snapshot *CodexUsageSnapshot, limitName string, now 
 		snapshot.CapturedAt,
 		now,
 		forceModelWindows,
+		true,
 	)
 
 	return windows

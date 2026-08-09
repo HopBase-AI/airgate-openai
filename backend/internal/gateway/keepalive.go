@@ -102,8 +102,15 @@ func (ka *sseCommentKeepAlive) Stop() {
 }
 
 func startSSEPingKeepAlive(w http.ResponseWriter) *ssePingKeepAlive {
+	return startSSEPingKeepAliveWithInterval(w, imageKeepAliveInterval)
+}
+
+func startSSEPingKeepAliveWithInterval(w http.ResponseWriter, interval time.Duration) *ssePingKeepAlive {
 	if w == nil {
 		return nil
+	}
+	if interval <= 0 {
+		interval = imageKeepAliveInterval
 	}
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -112,7 +119,7 @@ func startSSEPingKeepAlive(w http.ResponseWriter) *ssePingKeepAlive {
 	ka := &ssePingKeepAlive{w: w, cancel: cancel, done: make(chan struct{})}
 	go func() {
 		defer close(ka.done)
-		t := time.NewTicker(imageKeepAliveInterval)
+		t := time.NewTicker(interval)
 		defer t.Stop()
 		for {
 			select {
@@ -142,15 +149,8 @@ func (ka *ssePingKeepAlive) Wrote() bool {
 	return ka.wrote.Load()
 }
 
-func writeSSEErrorIfStarted(w http.ResponseWriter, ka *ssePingKeepAlive, message string) {
-	if ka == nil || !ka.Wrote() {
-		return
-	}
-	writeSSEError(w, message)
-}
-
 func writeSSEPing(w http.ResponseWriter) {
-	_, _ = w.Write([]byte("event: ping\ndata: {}\n\n"))
+	_, _ = w.Write([]byte(responseStreamKeepAliveComment))
 	if f, ok := w.(http.Flusher); ok {
 		f.Flush()
 	}

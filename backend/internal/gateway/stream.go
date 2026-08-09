@@ -241,7 +241,7 @@ func handleStreamResponseWithKeepAliveOptions(logger *slog.Logger, resp *http.Re
 		var failure *responsesFailureError
 		if errors.As(streamErr, &failure) {
 			kind := failure.outcomeKind()
-			if streamStarted && kind != sdk.OutcomeClientError {
+			if streamStarted && kind != sdk.OutcomeClientError && kind != sdk.OutcomeAccountRateLimited && kind != sdk.OutcomeAccountDead {
 				kind = sdk.OutcomeStreamAborted
 			}
 			errBody := openAIErrorJSON(openAIErrorTypeForStatus(failure.StatusCode), string(failure.Kind), failure.Message)
@@ -645,6 +645,11 @@ func ParseSSEStream(reader io.Reader, handler WSEventHandler) WSResult {
 		// 通知 handler 原始事件
 		if handler != nil {
 			handler.OnRawEvent(eventType, []byte(data))
+			if err := wsEventHandlerError(handler); err != nil {
+				result.Err = err
+				finalizeWSResult(&result, &textBuilder, &reasoningBuilder, start)
+				return result
+			}
 		}
 
 		switch eventType {
@@ -658,6 +663,11 @@ func ParseSSEStream(reader io.Reader, handler WSEventHandler) WSResult {
 				textBuilder.WriteString(delta)
 				if handler != nil {
 					handler.OnTextDelta(delta)
+					if err := wsEventHandlerError(handler); err != nil {
+						result.Err = err
+						finalizeWSResult(&result, &textBuilder, &reasoningBuilder, start)
+						return result
+					}
 				}
 			}
 
@@ -666,6 +676,11 @@ func ParseSSEStream(reader io.Reader, handler WSEventHandler) WSResult {
 				reasoningBuilder.WriteString(delta)
 				if handler != nil {
 					handler.OnReasoningDelta(delta)
+					if err := wsEventHandlerError(handler); err != nil {
+						result.Err = err
+						finalizeWSResult(&result, &textBuilder, &reasoningBuilder, start)
+						return result
+					}
 				}
 			}
 
@@ -733,6 +748,11 @@ func ParseSSEStream(reader io.Reader, handler WSEventHandler) WSResult {
 					if primary, ok := rateLimits["primary"].(map[string]any); ok {
 						if used, ok := primary["used_percent"].(float64); ok {
 							handler.OnRateLimits(used)
+							if err := wsEventHandlerError(handler); err != nil {
+								result.Err = err
+								finalizeWSResult(&result, &textBuilder, &reasoningBuilder, start)
+								return result
+							}
 						}
 					}
 				}

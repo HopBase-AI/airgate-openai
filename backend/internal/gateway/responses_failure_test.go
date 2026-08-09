@@ -131,6 +131,7 @@ func TestClassifyHTTPFailureProductionErrorMatrix(t *testing.T) {
 		{"401 invalid credential", 401, "invalid token", sdk.OutcomeAccountDead},
 		{"502 relay failure", 502, "error code: 502", sdk.OutcomeUpstreamTransient},
 		{"503 temporary outage", 503, "Service temporarily unavailable", sdk.OutcomeUpstreamTransient},
+		{"503 explicit overload", 503, "server_is_overloaded", sdk.OutcomeAccountRateLimited},
 		{"400 invalid request", 400, "invalid request payload", sdk.OutcomeClientError},
 		{"404 model unavailable", 404, "model_not_found", sdk.OutcomeClientError},
 		{"419 nonstandard client response", 419, "session expired", sdk.OutcomeClientError},
@@ -149,14 +150,16 @@ func TestClassifyHTTPFailureProductionErrorMatrix(t *testing.T) {
 
 func TestClassifyResponsesFailureProductionSSEMatrix(t *testing.T) {
 	tests := []struct {
-		name string
-		raw  string
-		want sdk.OutcomeKind
+		name           string
+		raw            string
+		want           sdk.OutcomeKind
+		wantRetryAfter time.Duration
 	}{
 		{
-			name: "server overloaded is retryable rate limit",
-			raw:  `{"type":"response.failed","response":{"error":{"type":"service_unavailable_error","code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later."}}}`,
-			want: sdk.OutcomeAccountRateLimited,
+			name:           "server overloaded is retryable rate limit",
+			raw:            `{"type":"response.failed","response":{"error":{"type":"service_unavailable_error","code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later."}}}`,
+			want:           sdk.OutcomeAccountRateLimited,
+			wantRetryAfter: 5 * time.Second,
 		},
 		{
 			name: "generic upstream error is transient",
@@ -180,6 +183,9 @@ func TestClassifyResponsesFailureProductionSSEMatrix(t *testing.T) {
 			}
 			if got := failure.outcomeKind(); got != tt.want {
 				t.Fatalf("outcome = %v, want %v; failure=%+v", got, tt.want, failure)
+			}
+			if failure.RetryAfter != tt.wantRetryAfter {
+				t.Fatalf("RetryAfter = %v, want %v", failure.RetryAfter, tt.wantRetryAfter)
 			}
 		})
 	}
@@ -208,6 +214,59 @@ func TestClassifyWSErrorEventUsageLimitReached(t *testing.T) {
 	}
 	if failure.RetryAfter < 59*time.Minute || failure.RetryAfter > 61*time.Minute {
 		t.Fatalf("expected RetryAfter~=1h from resets_in_seconds, got %s", failure.RetryAfter)
+	}
+}
+
+func TestClassifyWSErrorEventDefinitiveAccountFailure(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+	}{
+		{
+			name: "authentication error",
+			raw:  `{"type":"error","error":{"type":"authentication_error","code":"invalid_access_token","message":"The access token is invalid"}}`,
+		},
+		{
+			name: "account deactivated",
+			raw:  `{"type":"error","error":{"type":"invalid_request_error","code":"account_deactivated","message":"This account has been deactivated"}}`,
+		},
+		{
+			name: "organization disabled",
+			raw:  `{"type":"error","error":{"type":"permission_error","code":"forbidden","message":"Organization disabled due to policy violation"}}`,
+		},
+		{
+			name: "unauthorized code",
+			raw:  `{"type":"error","error":{"type":"permission_error","code":"unauthorized","message":"Access denied"}}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			failure := classifyWSErrorEvent([]byte(tt.raw))
+			if failure == nil {
+				t.Fatal("expected classified failure")
+			}
+			if failure.Kind != responsesFailureKindAccountDead {
+				t.Fatalf("Kind = %q, want account_dead", failure.Kind)
+			}
+			if failure.StatusCode != http.StatusUnauthorized {
+				t.Fatalf("StatusCode = %d, want 401", failure.StatusCode)
+			}
+			if got := failure.outcomeKind(); got != sdk.OutcomeAccountDead {
+				t.Fatalf("Outcome = %v, want AccountDead", got)
+			}
+		})
+	}
+}
+
+func TestClassifyWSErrorEventDoesNotTreatFeatureDisabledAsDeadAccount(t *testing.T) {
+	raw := []byte(`{"type":"error","error":{"type":"permission_error","code":"feature_unavailable","message":"Image generation is disabled for this model"}}`)
+	failure := classifyWSErrorEvent(raw)
+	if failure == nil {
+		t.Fatal("expected classified failure")
+	}
+	if failure.Kind == responsesFailureKindAccountDead {
+		t.Fatalf("feature-level disabled error killed account: %+v", failure)
 	}
 }
 

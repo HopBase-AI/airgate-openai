@@ -254,6 +254,79 @@ func TestTranslateResponsesSSERecordsDefaultPriority(t *testing.T) {
 	}
 }
 
+func TestTranslateResponsesSSEPostOutputRateLimitPreservesOutcomeAndUsage(t *testing.T) {
+	tests := []struct {
+		name       string
+		errorJSON  string
+		retryAfter time.Duration
+	}{
+		{
+			name:       "overload",
+			errorJSON:  `{"type":"service_unavailable_error","code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later."}`,
+			retryAfter: 5 * time.Second,
+		},
+		{
+			name:       "rate limit reset",
+			errorJSON:  `{"type":"usage_limit_reached","code":"rate_limit_exceeded","message":"The usage limit has been reached","resets_in_seconds":23}`,
+			retryAfter: 23 * time.Second,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sse := strings.Join([]string{
+				`data: {"type":"response.created","response":{"id":"resp_limited","model":"gpt-5.4"}}`,
+				`data: {"type":"response.output_text.delta","delta":"visible output"}`,
+				`data: {"type":"response.failed","response":{"usage":{"input_tokens":12,"output_tokens":3,"input_tokens_details":{"cached_tokens":2}},"error":` + tt.errorJSON + `}}`,
+				"",
+			}, "\n")
+			resp := &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+				Body:       io.NopCloser(strings.NewReader(sse)),
+			}
+			w := httptest.NewRecorder()
+
+			outcome, err := translateResponsesSSEToAnthropicSSE(
+				context.Background(),
+				resp,
+				w,
+				"claude-sonnet-4-6",
+				"gpt-5.4",
+				[]byte(`{"model":"claude-sonnet-4-6","stream":true,"messages":[{"role":"user","content":"ping"}]}`),
+				"",
+				"",
+				time.Now(),
+				openAISessionResolution{},
+			)
+			if err != nil {
+				t.Fatalf("translateResponsesSSEToAnthropicSSE error: %v", err)
+			}
+			if outcome.Kind != sdk.OutcomeAccountRateLimited {
+				t.Fatalf("Kind = %v, want AccountRateLimited", outcome.Kind)
+			}
+			if outcome.RetryAfter != tt.retryAfter {
+				t.Fatalf("RetryAfter = %v, want %v", outcome.RetryAfter, tt.retryAfter)
+			}
+			if outcome.Usage == nil {
+				t.Fatal("Usage = nil, want partial upstream usage")
+			}
+			if got := usageMetricInt(outcome.Usage, usageMetricInputTokens); got != 10 {
+				t.Fatalf("billable uncached input tokens = %d, want 10", got)
+			}
+			if got := usageMetricInt(outcome.Usage, usageMetricCachedInputTokens); got != 2 {
+				t.Fatalf("cached input tokens = %d, want 2", got)
+			}
+			if got := usageMetricInt(outcome.Usage, usageMetricOutputTokens); got != 3 {
+				t.Fatalf("output tokens = %d, want 3", got)
+			}
+			if !strings.Contains(w.Body.String(), "visible output") {
+				t.Fatalf("visible output was not forwarded: %q", w.Body.String())
+			}
+		})
+	}
+}
+
 func TestForwardAnthropicCountTokensReturnsEstimate(t *testing.T) {
 	w := httptest.NewRecorder()
 	req := &sdk.ForwardRequest{

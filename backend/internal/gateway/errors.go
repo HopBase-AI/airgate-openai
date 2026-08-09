@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -23,10 +24,16 @@ import (
 //	401 / 403 → AccountDead（附加消息关键词检查"usage limit" / "rate limit" 等会降级为 RateLimited）
 //	400 + 消息含限流关键词 → AccountRateLimited（部分上游用 400 返回 usage_limit_reached）
 //	400 + 消息含 disabled/deactivated → AccountDead
-//	5xx → UpstreamTransient
+//	529 / 明确 overload 的 5xx → AccountRateLimited；其它 5xx → UpstreamTransient
 //	其它 4xx → ClientError（客户端请求自己的问题，账号无辜）
 func classifyHTTPFailure(statusCode int, message string) sdk.OutcomeKind {
 	if isTemporaryRateLimitText(message) && (statusCode == 400 || statusCode == 403 || statusCode == 429) {
+		return sdk.OutcomeAccountRateLimited
+	}
+	if statusCode == 529 {
+		return sdk.OutcomeAccountRateLimited
+	}
+	if statusCode >= 500 && isOverloadedText(message) {
 		return sdk.OutcomeAccountRateLimited
 	}
 	if isDisabledAccountText(message) && (statusCode == 400 || statusCode == 403) {
@@ -84,6 +91,54 @@ func isDisabledAccountText(parts ...string) bool {
 	return strings.Contains(combined, "disabled") ||
 		strings.Contains(combined, "deactivated") ||
 		strings.Contains(combined, "suspended")
+}
+
+// isDefinitiveCredentialFailureText only matches errors that establish the
+// credential or account itself is unusable. Generic 403/forbidden text is
+// intentionally excluded because upstream risk controls are recoverable.
+func isDefinitiveCredentialFailureText(parts ...string) bool {
+	combined := strings.ToLower(strings.Join(parts, " "))
+	if combined == "" {
+		return false
+	}
+	for _, signal := range []string{
+		"authentication_error",
+		"auth_error",
+		"invalid_access_token",
+		"invalid_token",
+		"token_expired",
+		"account_deactivated",
+		"account_disabled",
+		"account_suspended",
+		"invalid_grant",
+	} {
+		if strings.Contains(combined, signal) {
+			return true
+		}
+	}
+	if isDisabledAccountText(combined) &&
+		(strings.Contains(combined, "account") ||
+			strings.Contains(combined, "organization") ||
+			strings.Contains(combined, "workspace") ||
+			strings.Contains(combined, "credential")) {
+		return true
+	}
+	for _, phrase := range []string{
+		"authentication failed",
+		"not authenticated",
+		"invalid access token",
+		"access token is invalid",
+		"access token expired",
+		"access token has expired",
+		"expired access token",
+		"token is invalid",
+		"token has expired",
+	} {
+		if strings.Contains(combined, phrase) {
+			return true
+		}
+	}
+	return false
 }
 
 func isModelUnsupportedText(parts ...string) bool {
@@ -174,10 +229,27 @@ func openAIErrorTypeForStatus(statusCode int) string {
 
 // extractRetryAfterHeader 从响应头提取 Retry-After。
 func extractRetryAfterHeader(headers http.Header) time.Duration {
-	val := headers.Get("Retry-After")
+	val := strings.TrimSpace(headers.Get("Retry-After"))
 	if val == "" {
 		return 0
 	}
+	if seconds, err := strconv.ParseInt(val, 10, 64); err == nil {
+		if seconds <= 0 {
+			return 0
+		}
+		return time.Duration(seconds) * time.Second
+	}
+	if retryAt, err := http.ParseTime(val); err == nil {
+		if delay := time.Until(retryAt); delay > 0 {
+			return delay
+		}
+		return 0
+	}
+	if delay := parseRetryDelay(val); delay > 0 {
+		return delay
+	}
+	// Preserve the historical decimal-seconds fallback used by providers that
+	// send non-standard values such as "1.5".
 	return parseRetryDelay("try again in " + val + "s")
 }
 

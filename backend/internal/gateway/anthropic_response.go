@@ -276,6 +276,11 @@ func convertResponsesEventToAnthropic(rawLine []byte, originalRequest []byte, st
 		return output
 
 	case "response.failed":
+		inputTokens, outputTokens, cachedTokens, reasoningTokens := extractResponsesUsage(root.Get("response.usage"))
+		state.InputTokens = int(inputTokens)
+		state.OutputTokens = int(outputTokens)
+		state.CachedInputTokens = int(cachedTokens)
+		state.ReasoningOutputTokens = int(reasoningTokens)
 		errMsg := root.Get("response.error.message").String()
 		if errMsg == "" {
 			errMsg = "upstream response failed"
@@ -788,8 +793,9 @@ done:
 		var failure *responsesFailureError
 		if errors.As(streamErr, &failure) {
 			kind := failure.outcomeKind()
-			// 流已开写后上游 response.failed：除 ClientError 外都按 StreamAborted 报告
-			if kind != sdk.OutcomeClientError {
+			// 已提交的普通故障不能重放；账号限流/失效仍需保留判决，
+			// 让 Core 冷却或禁用实际故障账号。
+			if kind != sdk.OutcomeClientError && kind != sdk.OutcomeAccountRateLimited && kind != sdk.OutcomeAccountDead {
 				kind = sdk.OutcomeStreamAborted
 			}
 			errBody := anthropicErrorJSONWithCode(failure.AnthropicErrorType, failure.Code, failure.Message)

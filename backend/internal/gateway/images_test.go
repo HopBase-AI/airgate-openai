@@ -268,12 +268,42 @@ func TestHandleImagesResponse_TokenAttribution(t *testing.T) {
 	}
 }
 
-func TestWriteSSEPingUsesOpenAIStyleEvent(t *testing.T) {
+func TestWriteSSEPingUsesCoreRecognizedComment(t *testing.T) {
 	w := httptest.NewRecorder()
 	writeSSEPing(w)
 
-	if got, want := w.Body.String(), "event: ping\ndata: {}\n\n"; got != want {
+	if got, want := w.Body.String(), responseStreamKeepAliveComment; got != want {
 		t.Fatalf("body = %q, want %q", got, want)
+	}
+}
+
+func TestImageKeepAliveEmptyOverloadRemainsFailoverEligible(t *testing.T) {
+	w := newSignalingResponseWriter()
+	ka := startSSEPingKeepAliveWithInterval(w, 5*time.Millisecond)
+	waitForHeartbeat(t, w)
+	ka.Stop()
+
+	outcome := failureOutcome(
+		http.StatusServiceUnavailable,
+		nil,
+		http.Header{"Retry-After": []string{"5"}},
+		"server_is_overloaded",
+		5*time.Second,
+	)
+	if outcome.Kind != sdk.OutcomeAccountRateLimited || !outcome.Kind.ShouldFailover() {
+		t.Fatalf("Kind = %v, want failover-eligible AccountRateLimited", outcome.Kind)
+	}
+	if outcome.Upstream.StatusCode != http.StatusServiceUnavailable || len(outcome.Upstream.Body) != 0 {
+		t.Fatalf("Upstream = status:%d body:%q, want empty 503", outcome.Upstream.StatusCode, outcome.Upstream.Body)
+	}
+	if outcome.RetryAfter != 5*time.Second {
+		t.Fatalf("RetryAfter = %v, want 5s", outcome.RetryAfter)
+	}
+	if err := forwardErrForOutcome(outcome, errors.New("upstream overloaded")); err == nil {
+		t.Fatal("empty 503 lost Core-facing error needed for failover")
+	}
+	if body := w.BodyString(); strings.ReplaceAll(body, responseStreamKeepAliveComment, "") != "" {
+		t.Fatalf("heartbeat committed business output: %q", body)
 	}
 }
 
@@ -2597,6 +2627,86 @@ func TestForwardImagesViaResponsesTool_InvalidSize(t *testing.T) {
 	}
 	if !strings.Contains(string(outcome.Upstream.Body), "16") {
 		t.Errorf("error body should mention the 16-multiple constraint: %s", outcome.Upstream.Body)
+	}
+}
+
+func TestForwardImagesViaResponsesTool_KeepAliveThenOverloadStillFailsOver(t *testing.T) {
+	w := newSignalingResponseWriter()
+	serverErr := make(chan error, 1)
+	upgrader := websocket.Upgrader{}
+	server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(rw, r, nil)
+		if err != nil {
+			serverErr <- fmt.Errorf("upgrade websocket: %w", err)
+			return
+		}
+		defer func() { _ = conn.Close() }()
+
+		var msg json.RawMessage
+		if err := conn.ReadJSON(&msg); err != nil {
+			serverErr <- fmt.Errorf("read websocket request: %w", err)
+			return
+		}
+		select {
+		case heartbeat := <-w.writes:
+			if got := string(heartbeat); got != responseStreamKeepAliveComment {
+				serverErr <- fmt.Errorf("heartbeat = %q, want %q", got, responseStreamKeepAliveComment)
+				return
+			}
+		case <-time.After(time.Second):
+			serverErr <- errors.New("timed out waiting for image keepalive")
+			return
+		}
+
+		failure := `{"type":"response.failed","response":{"error":{"type":"service_unavailable_error","code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later."}}}`
+		if err := conn.WriteMessage(websocket.TextMessage, []byte(failure)); err != nil {
+			serverErr <- fmt.Errorf("write websocket failure: %w", err)
+			return
+		}
+		serverErr <- nil
+	}))
+	defer server.Close()
+
+	g := &OpenAIGateway{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	req := &sdk.ForwardRequest{
+		Account: &sdk.Account{ID: 1, Credentials: map[string]string{
+			"access_token":       "tok",
+			"chatgpt_account_id": "acct-123",
+		}},
+		Model:  "gpt-image-2",
+		Body:   []byte(`{"prompt":"draw a stable gateway","model":"gpt-image-2","size":"1024x1024"}`),
+		Stream: true,
+		Headers: http.Header{
+			"X-Forwarded-Path":   []string{"/v1/images/generations"},
+			"X-Forwarded-Method": []string{http.MethodPost},
+			"Content-Type":       []string{"application/json"},
+		},
+		Writer: w,
+	}
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	outcome, err := g.forwardImagesViaResponsesToolWithURL(t.Context(), req, wsURL, 5*time.Millisecond)
+	if err == nil {
+		t.Fatal("overload error = nil, want Core-facing error for failover")
+	}
+	if outcome.Kind != sdk.OutcomeAccountRateLimited || !outcome.Kind.ShouldFailover() {
+		t.Fatalf("Kind = %v, want failover-eligible AccountRateLimited", outcome.Kind)
+	}
+	if outcome.Upstream.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("StatusCode = %d, want 503", outcome.Upstream.StatusCode)
+	}
+	if outcome.RetryAfter != 5*time.Second {
+		t.Fatalf("RetryAfter = %v, want 5s", outcome.RetryAfter)
+	}
+	if serverFailure := <-serverErr; serverFailure != nil {
+		t.Fatal(serverFailure)
+	}
+	body := w.BodyString()
+	if body == "" {
+		t.Fatal("expected at least one keepalive comment")
+	}
+	if remainder := strings.ReplaceAll(body, responseStreamKeepAliveComment, ""); remainder != "" {
+		t.Fatalf("failed attempt wrote business/error SSE after keepalive: %q", body)
 	}
 }
 

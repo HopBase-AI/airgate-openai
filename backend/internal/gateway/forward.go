@@ -443,7 +443,6 @@ func (g *OpenAIGateway) forwardAPIKey(ctx context.Context, req *sdk.ForwardReque
 				sdk.LogFieldModel, req.Model,
 				sdk.LogFieldError, err,
 			)
-			writeSSEErrorIfStarted(req.Writer, sseKA, sanitizedImageSSEErrorMessage)
 		}
 		logger.Warn("upstream_request_failed",
 			sdk.LogFieldAccountID, account.ID,
@@ -473,7 +472,6 @@ func (g *OpenAIGateway) forwardAPIKey(ctx context.Context, req *sdk.ForwardReque
 				sdk.LogFieldStatus, resp.StatusCode,
 				sdk.LogFieldReason, errDetail,
 			)
-			writeSSEErrorIfStarted(req.Writer, sseKA, sanitizedImageSSEErrorMessage)
 		}
 		logger.Warn("upstream_request_non_2xx",
 			sdk.LogFieldAccountID, account.ID,
@@ -515,7 +513,6 @@ func (g *OpenAIGateway) forwardAPIKey(ctx context.Context, req *sdk.ForwardReque
 			reason := fmt.Sprintf("读取 Images 响应失败: %v", readErr)
 			if sseKA != nil {
 				sseKA.Stop()
-				writeSSEErrorIfStarted(req.Writer, sseKA, sanitizedImageSSEErrorMessage)
 			}
 			return transientOutcome(reason), fmt.Errorf("%s", reason)
 		}
@@ -546,7 +543,6 @@ func (g *OpenAIGateway) forwardAPIKey(ctx context.Context, req *sdk.ForwardReque
 				)
 				if sseKA != nil {
 					sseKA.Stop()
-					writeSSEErrorIfStarted(req.Writer, sseKA, sanitizedImageSSEErrorMessage)
 				}
 				return transientOutcome(reason), fmt.Errorf("%s", reason)
 			}
@@ -675,6 +671,66 @@ func enrichModelsResponse(resp *http.Response) *http.Response {
 // ──────────────────────────────────────────────────────
 
 // forwardOAuth 使用 WebSocket 连接上游，将响应以 SSE 格式写回客户端
+type oauthWSFailureDetails struct {
+	kind       sdk.OutcomeKind
+	statusCode int
+	message    string
+	retryAfter time.Duration
+}
+
+func classifyOAuthWSFailure(err error, streamOutputStarted bool) oauthWSFailureDetails {
+	details := oauthWSFailureDetails{
+		kind:       sdk.OutcomeUpstreamTransient,
+		statusCode: http.StatusBadGateway,
+		message:    err.Error(),
+	}
+	var downstreamErr *downstreamWriteError
+	var failure *responsesFailureError
+	switch {
+	case errors.As(err, &downstreamErr):
+		details.kind = sdk.OutcomeStreamAborted
+		details.statusCode = http.StatusOK
+	case errors.As(err, &failure):
+		details.kind = failure.outcomeKind()
+		details.statusCode = failure.StatusCode
+		details.message = failure.Message
+		details.retryAfter = failure.RetryAfter
+	}
+
+	// Once business output is visible, ordinary upstream failures are stream
+	// aborts and must never be replayed. Explicit account overload remains a
+	// rate-limit verdict so the scheduler can cool down that credential; Core
+	// independently prevents replay after the application response is committed.
+	if streamOutputStarted && details.kind != sdk.OutcomeClientError && details.kind != sdk.OutcomeAccountRateLimited && details.kind != sdk.OutcomeAccountDead {
+		details.kind = sdk.OutcomeStreamAborted
+	}
+	return details
+}
+
+func forwardErrorForOAuthWSFailure(err error, streamOutputStarted bool, kind sdk.OutcomeKind, usage *sdk.Usage) error {
+	var downstreamErr *downstreamWriteError
+	if errors.As(err, &downstreamErr) {
+		return nil
+	}
+	// A committed overload must still cool down the account, but keeping the Go
+	// error would make Core record a zero-cost plugin failure and discard Usage.
+	// The same applies to any post-output abort carrying billable partial usage.
+	if streamOutputStarted && (kind == sdk.OutcomeAccountRateLimited || kind == sdk.OutcomeAccountDead || usage != nil) {
+		return nil
+	}
+	return err
+}
+
+func wsResultHasBillableUsage(result WSResult, numImages int) bool {
+	return result.InputTokens > 0 ||
+		result.OutputTokens > 0 ||
+		result.CachedInputTokens > 0 ||
+		result.ReasoningOutputTokens > 0 ||
+		result.ToolImageInputTokens > 0 ||
+		result.ToolImageOutputTokens > 0 ||
+		numImages > 0
+}
+
 func (g *OpenAIGateway) forwardOAuth(ctx context.Context, req *sdk.ForwardRequest) (sdk.ForwardOutcome, error) {
 	start := time.Now()
 	account := req.Account
@@ -877,61 +933,59 @@ func (g *OpenAIGateway) forwardOAuth(ctx context.Context, req *sdk.ForwardReques
 	}
 
 	if result.Err != nil {
-		var failure *responsesFailureError
-		kind := sdk.OutcomeUpstreamTransient
-		statusCode := http.StatusBadGateway
-		message := result.Err.Error()
-		var retryAfter time.Duration
-		if errors.As(result.Err, &failure) {
-			kind = failure.outcomeKind()
-			statusCode = failure.StatusCode
-			message = failure.Message
-			retryAfter = failure.RetryAfter
-		}
 		streamOutputStarted := (lastChatWriter != nil && lastChatWriter.wrote) ||
 			(lastSSEHandler != nil && lastSSEHandler.wrote)
-		// 只有已经向客户端写过可见输出时才视为流中断；首包前错误仍交给 Core failover。
-		if req.Stream && streamOutputStarted && kind != sdk.OutcomeClientError {
-			kind = sdk.OutcomeStreamAborted
-		}
-		errBody := openAIErrorJSON(openAIErrorTypeForStatus(statusCode), kind.String(), message)
+		failure := classifyOAuthWSFailure(result.Err, req.Stream && streamOutputStarted)
+		errBody := openAIErrorJSON(openAIErrorTypeForStatus(failure.statusCode), failure.kind.String(), failure.message)
 		logger.Warn("upstream_request_non_2xx",
 			sdk.LogFieldAccountID, account.ID,
 			sdk.LogFieldModel, req.Model,
-			sdk.LogFieldStatus, statusCode,
+			sdk.LogFieldStatus, failure.statusCode,
 			sdk.LogFieldDurationMs, elapsed.Milliseconds(),
-			sdk.LogFieldReason, message,
+			sdk.LogFieldReason, failure.message,
 			"phase", "ws_response",
 		)
 		outcome := sdk.ForwardOutcome{
-			Kind:       kind,
-			Upstream:   sdk.UpstreamResponse{StatusCode: statusCode, Headers: http.Header{"Content-Type": []string{"application/json"}}, Body: errBody},
-			Reason:     message,
-			RetryAfter: retryAfter,
+			Kind:       failure.kind,
+			Upstream:   sdk.UpstreamResponse{StatusCode: failure.statusCode, Headers: http.Header{"Content-Type": []string{"application/json"}}, Body: errBody},
+			Reason:     failure.message,
+			RetryAfter: failure.retryAfter,
 			Duration:   elapsed,
 		}
 		// 即使请求失败，上游可能已消耗 token（如 response.failed / response.incomplete），
 		// 仍需计费避免漏洞。
-		if result.InputTokens > 0 || result.OutputTokens > 0 || result.CachedInputTokens > 0 {
+		if wsResultHasBillableUsage(result, numImages) {
 			fillUsageCostWithImageTool(usage, numImages, imageToolSize, result.ToolImageInputTokens, result.ToolImageOutputTokens)
 			outcome.Usage = usage
 		}
-		return outcome, result.Err
+		return outcome, forwardErrorForOAuthWSFailure(
+			result.Err,
+			req.Stream && streamOutputStarted,
+			outcome.Kind,
+			outcome.Usage,
+		)
 	}
 
 	// 结束标记 / 响应体写回。必须在 result.Err 判定之后执行，避免把上游错误补成
 	// finish_reason=stop + [DONE] 的空成功流。
+	var responseWriteErr error
 	switch {
 	case isChatCompletions && req.Stream:
 		if lastChatWriter != nil {
-			lastChatWriter.finalize()
+			responseWriteErr = lastChatWriter.finalize()
 		}
 	case isChatCompletions && !req.Stream:
 		if w != nil {
 			body := buildNonStreamChatCompletion(result, req.Model)
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write(body)
+			n, err := w.Write(body)
+			if err == nil && n != len(body) {
+				err = io.ErrShortWrite
+			}
+			if err != nil {
+				responseWriteErr = newDownstreamWriteError(fmt.Errorf("写入客户端 Chat Completions 响应失败: %w", err))
+			}
 		}
 	case !isChatCompletions && !req.Stream:
 		// /v1/responses 非流式：从 WSResult 抽 response 字段回写 JSON
@@ -939,17 +993,39 @@ func (g *OpenAIGateway) forwardOAuth(ctx context.Context, req *sdk.ForwardReques
 			body := buildNonStreamResponses(result)
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write(body)
+			n, err := w.Write(body)
+			if err == nil && n != len(body) {
+				err = io.ErrShortWrite
+			}
+			if err != nil {
+				responseWriteErr = newDownstreamWriteError(fmt.Errorf("写入客户端 Responses 响应失败: %w", err))
+			}
 		}
 	default:
 		// /v1/responses 流式：补 [DONE] 标记
 		if w != nil {
-			if _, err := fmt.Fprint(w, "data: [DONE]\n\n"); err == nil {
+			n, err := io.WriteString(w, "data: [DONE]\n\n")
+			if err == nil && n != len("data: [DONE]\n\n") {
+				err = io.ErrShortWrite
+			}
+			if err == nil {
 				if flusher, ok := w.(http.Flusher); ok {
 					flusher.Flush()
 				}
+			} else {
+				responseWriteErr = newDownstreamWriteError(fmt.Errorf("写入客户端 Responses 完成标记失败: %w", err))
 			}
 		}
+	}
+	if responseWriteErr != nil {
+		fillUsageCostWithImageTool(usage, numImages, imageToolSize, result.ToolImageInputTokens, result.ToolImageOutputTokens)
+		return sdk.ForwardOutcome{
+			Kind:     sdk.OutcomeStreamAborted,
+			Upstream: sdk.UpstreamResponse{StatusCode: http.StatusOK},
+			Reason:   responseWriteErr.Error(),
+			Usage:    usage,
+			Duration: elapsed,
+		}, nil
 	}
 
 	logger.Debug("upstream_request_completed",
@@ -985,6 +1061,8 @@ type sseEventWriter struct {
 	firstTokenMs   int64     // 首 token 到达时间（毫秒）
 	firstTokenOnce sync.Once // 确保只记录一次
 	wrote          bool
+	pending        strings.Builder
+	err            error
 }
 
 func (s *sseEventWriter) OnTextDelta(string)      {}
@@ -999,13 +1077,9 @@ func (s *sseEventWriter) OnRateLimits(used float64) {
 }
 
 func (s *sseEventWriter) OnRawEvent(eventType string, data []byte) {
-	if s.w == nil || eventType == "" {
+	if s.w == nil || eventType == "" || s.err != nil {
 		return
 	}
-	// 记录首 token 延迟（第一个有效事件到达客户端的时间）
-	s.firstTokenOnce.Do(func() {
-		s.firstTokenMs = time.Since(s.start).Milliseconds()
-	})
 	// 过滤不需要转发给客户端的内部事件，并捕获用量
 	switch eventType {
 	case "codex.rate_limits":
@@ -1022,10 +1096,44 @@ func (s *sseEventWriter) OnRawEvent(eventType string, data []byte) {
 			}
 		}
 	}
-	if _, err := fmt.Fprintf(s.w, "event: %s\ndata: %s\n\n", eventType, strings.ReplaceAll(string(data), "\n", "")); err != nil {
+	event := fmt.Sprintf("event: %s\ndata: %s\n\n", eventType, strings.ReplaceAll(string(data), "\n", ""))
+	if !s.wrote {
+		if wsEventIsTerminalFailure(eventType, data) {
+			s.pending.Reset()
+			return
+		}
+		s.pending.WriteString(event)
+		if !streamDataHasOutput(string(data)) && !wsEventIsSuccessfulCompletion(eventType, data) {
+			return
+		}
+		event = s.pending.String()
+		s.pending.Reset()
+	}
+	s.writePayload(event)
+}
+
+func (s *sseEventWriter) Err() error {
+	return s.err
+}
+
+func (s *sseEventWriter) writePayload(payload string) {
+	if payload == "" || s.err != nil {
 		return
 	}
-	s.wrote = true
+	s.firstTokenOnce.Do(func() {
+		s.firstTokenMs = time.Since(s.start).Milliseconds()
+	})
+	n, err := io.WriteString(s.w, payload)
+	if n > 0 {
+		s.wrote = true
+	}
+	if err == nil && n != len(payload) {
+		err = io.ErrShortWrite
+	}
+	if err != nil {
+		s.err = newDownstreamWriteError(fmt.Errorf("写入客户端 Responses 流失败: %w", err))
+		return
+	}
 	if s.flusher != nil {
 		s.flusher.Flush()
 	}

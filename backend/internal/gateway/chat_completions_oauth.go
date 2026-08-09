@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"sync"
@@ -94,6 +95,8 @@ type chatCompletionsStreamWriter struct {
 	firstTokenMs   int64
 	start          time.Time
 	wrote          bool
+	pending        [][]byte
+	err            error
 
 	accountID  int64
 	sessionKey string
@@ -138,12 +141,9 @@ func (s *chatCompletionsStreamWriter) OnRateLimits(usedPercent float64) {
 }
 
 func (s *chatCompletionsStreamWriter) OnRawEvent(eventType string, data []byte) {
-	if s.w == nil || eventType == "" {
+	if s.w == nil || eventType == "" || s.err != nil {
 		return
 	}
-	s.firstTokenOnce.Do(func() {
-		s.firstTokenMs = time.Since(s.start).Milliseconds()
-	})
 
 	// 捕获内部事件：用量快照与会话状态，但不转发给客户端
 	switch eventType {
@@ -163,15 +163,55 @@ func (s *chatCompletionsStreamWriter) OnRawEvent(eventType string, data []byte) 
 	}
 
 	chunks := s.translateEvent(eventType, data)
-	for _, chunk := range chunks {
-		if _, err := fmt.Fprintf(s.w, "data: %s\n\n", chunk); err != nil {
+	if !s.wrote {
+		if wsEventIsTerminalFailure(eventType, data) {
+			s.pending = nil
 			return
 		}
+		s.pending = append(s.pending, chunks...)
+		if !streamDataHasOutput(string(data)) && !wsEventIsSuccessfulCompletion(eventType, data) {
+			return
+		}
+		chunks = s.pending
+		s.pending = nil
 	}
-	if len(chunks) > 0 {
+	s.writeChunks(chunks)
+}
+
+func (s *chatCompletionsStreamWriter) Err() error {
+	return s.err
+}
+
+func (s *chatCompletionsStreamWriter) writeChunks(chunks [][]byte) {
+	if len(chunks) == 0 || s.err != nil {
+		return
+	}
+	var payload strings.Builder
+	for _, chunk := range chunks {
+		fmt.Fprintf(&payload, "data: %s\n\n", chunk)
+	}
+	s.writePayload(payload.String())
+}
+
+func (s *chatCompletionsStreamWriter) writePayload(payload string) {
+	if payload == "" || s.err != nil {
+		return
+	}
+	s.firstTokenOnce.Do(func() {
+		s.firstTokenMs = time.Since(s.start).Milliseconds()
+	})
+	n, err := io.WriteString(s.w, payload)
+	if n > 0 {
 		s.wrote = true
 	}
-	if s.flusher != nil && len(chunks) > 0 {
+	if err == nil && n != len(payload) {
+		err = io.ErrShortWrite
+	}
+	if err != nil {
+		s.err = newDownstreamWriteError(fmt.Errorf("写入客户端 Chat Completions 流失败: %w", err))
+		return
+	}
+	if s.flusher != nil {
 		s.flusher.Flush()
 	}
 }
@@ -289,43 +329,43 @@ func (s *chatCompletionsStreamWriter) translateEvent(eventType string, data []by
 		return [][]byte{s.makeFinishChunk(finishReason)}
 
 	case "response.incomplete":
-		s.finalized = true
-		finishReason := "stop"
-		if gjson.GetBytes(data, "response.incomplete_details.reason").String() == "max_output_tokens" {
-			finishReason = "length"
+		if gjson.GetBytes(data, "response.incomplete_details.reason").String() != "max_output_tokens" {
+			return nil
 		}
-		return [][]byte{s.makeFinishChunk(finishReason)}
+		s.finalized = true
+		return [][]byte{s.makeFinishChunk("length")}
 	}
 	return nil
 }
 
 // finalize 在 ReceiveWSResponse 返回后调用：如果上游没触发 response.completed
 // （例如上游断流），补一个兜底 finish chunk；最后写入 [DONE] 终止符。
-func (s *chatCompletionsStreamWriter) finalize() {
+func (s *chatCompletionsStreamWriter) finalize() error {
 	if s.w == nil {
-		return
+		return nil
+	}
+	if s.err != nil {
+		return s.err
 	}
 	if !s.finalized {
 		finishReason := "stop"
 		if s.sawToolCall {
 			finishReason = "tool_calls"
 		}
-		if _, err := fmt.Fprintf(s.w, "data: %s\n\n", s.makeFinishChunk(finishReason)); err != nil {
-			return
-		}
+		s.writeChunks([][]byte{s.makeFinishChunk(finishReason)})
 	}
-	if s.includeUsage && s.usage != nil {
+	if s.err == nil && s.includeUsage && s.usage != nil {
 		usageChunk := s.makeChunkBase()
 		usageChunk["choices"] = []any{}
 		usageChunk["usage"] = s.usage
 		if b, err := json.Marshal(usageChunk); err == nil {
-			_, _ = fmt.Fprintf(s.w, "data: %s\n\n", b)
+			s.writeChunks([][]byte{b})
 		}
 	}
-	_, _ = fmt.Fprint(s.w, "data: [DONE]\n\n")
-	if s.flusher != nil {
-		s.flusher.Flush()
+	if s.err == nil {
+		s.writePayload("data: [DONE]\n\n")
 	}
+	return s.err
 }
 
 func (s *chatCompletionsStreamWriter) makeChunkBase() map[string]any {

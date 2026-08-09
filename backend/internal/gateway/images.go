@@ -1327,7 +1327,7 @@ func (g *OpenAIGateway) forwardImagesViaResponsesTool(ctx context.Context, req *
 	return g.forwardImagesViaResponsesToolWithURL(ctx, req, ChatGPTWSURL)
 }
 
-func (g *OpenAIGateway) forwardImagesViaResponsesToolWithURL(ctx context.Context, req *sdk.ForwardRequest, targetURL string) (sdk.ForwardOutcome, error) {
+func (g *OpenAIGateway) forwardImagesViaResponsesToolWithURL(ctx context.Context, req *sdk.ForwardRequest, targetURL string, keepAliveIntervalOverride ...time.Duration) (sdk.ForwardOutcome, error) {
 	start := time.Now()
 	account := req.Account
 
@@ -1411,7 +1411,11 @@ func (g *OpenAIGateway) forwardImagesViaResponsesToolWithURL(ctx context.Context
 
 	var sseKA *ssePingKeepAlive
 	if req.Stream {
-		sseKA = startSSEPingKeepAlive(req.Writer)
+		keepAliveInterval := imageKeepAliveInterval
+		if len(keepAliveIntervalOverride) > 0 && keepAliveIntervalOverride[0] > 0 {
+			keepAliveInterval = keepAliveIntervalOverride[0]
+		}
+		sseKA = startSSEPingKeepAliveWithInterval(req.Writer, keepAliveInterval)
 	}
 
 	handler := &imagesSilentHandler{accountID: account.ID, start: start}
@@ -1431,11 +1435,6 @@ func (g *OpenAIGateway) forwardImagesViaResponsesToolWithURL(ctx context.Context
 					sseKA.Stop()
 					g.logger.Warn("Images OAuth 上游返回客户端错误，已脱敏响应",
 						"path", reqPath, "model", imgReq.Model, "status_code", failure.StatusCode, "code", failure.Code, "reason", failure.Message)
-					clientMsg := sanitizedImageSSEErrorMessage
-					if failure.StatusCode == http.StatusRequestEntityTooLarge {
-						clientMsg = imageTooLargeSSEErrorMessage
-					}
-					writeSSEErrorIfStarted(req.Writer, sseKA, clientMsg)
 				}
 				return sdk.ForwardOutcome{
 					Kind: sdk.OutcomeClientError,
@@ -1456,7 +1455,6 @@ func (g *OpenAIGateway) forwardImagesViaResponsesToolWithURL(ctx context.Context
 				g.logger.Warn("Images OAuth 流式请求失败，已脱敏响应",
 					"path", reqPath, "model", imgReq.Model, "status_code", failure.StatusCode,
 					"kind", failure.Kind, "retry_after", failure.RetryAfter, "error", wsResult.Err)
-				writeSSEErrorIfStarted(req.Writer, sseKA, sanitizedImageSSEErrorMessage)
 			}
 			errBody := openAIErrorJSON(openAIErrorTypeForStatus(failure.StatusCode), string(failure.Kind), failure.Message)
 			return sdk.ForwardOutcome{
@@ -1472,7 +1470,6 @@ func (g *OpenAIGateway) forwardImagesViaResponsesToolWithURL(ctx context.Context
 			sseKA.Stop()
 			g.logger.Warn("Images OAuth 流式请求失败，已脱敏响应",
 				"path", reqPath, "model", imgReq.Model, "error", wsResult.Err)
-			writeSSEErrorIfStarted(req.Writer, sseKA, sanitizedImageSSEErrorMessage)
 		}
 		return sdk.ForwardOutcome{
 			Kind:     sdk.OutcomeUpstreamTransient,
@@ -1494,7 +1491,6 @@ func (g *OpenAIGateway) forwardImagesViaResponsesToolWithURL(ctx context.Context
 				g.logger.Warn("Images OAuth 图像工具返回客户端错误，已脱敏响应",
 					"path", reqPath, "model", imgReq.Model, "status_code", failure.StatusCode,
 					"code", failure.Code, "reason", reason)
-				writeSSEErrorIfStarted(req.Writer, sseKA, sanitizedImageSSEErrorMessage)
 			}
 			return sdk.ForwardOutcome{
 				Kind: sdk.OutcomeClientError,
@@ -1512,7 +1508,6 @@ func (g *OpenAIGateway) forwardImagesViaResponsesToolWithURL(ctx context.Context
 			sseKA.Stop()
 			g.logger.Warn("Images OAuth 未返回图像结果，已脱敏响应",
 				"path", reqPath, "model", imgReq.Model, "reason", reason)
-			writeSSEErrorIfStarted(req.Writer, sseKA, sanitizedImageSSEErrorMessage)
 		}
 		return sdk.ForwardOutcome{
 			Kind: sdk.OutcomeUpstreamTransient,
@@ -1716,7 +1711,6 @@ func handleImagesResponseWithLogger(logger *slog.Logger, resp *http.Response, w 
 			if logger != nil {
 				logger.Warn("Images APIKey 响应读取失败，已脱敏响应", "model", fallbackModel, "error", err)
 			}
-			writeSSEErrorIfStarted(w, sseKA, sanitizedImageSSEErrorMessage)
 		}
 		return transientOutcome(reason), fmt.Errorf("%s", reason)
 	}
