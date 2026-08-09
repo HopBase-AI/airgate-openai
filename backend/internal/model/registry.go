@@ -151,17 +151,20 @@ var registry = map[string]Spec{
 	"gemini-3.1-flash-image-preview-c": pricedImageSpec("Gemini 3.1 Flash Image Preview C", 0.5, 0.05, 3.0),
 	"gemini-3.1-flash-lite-image":      pricedImageSpec("Gemini 3.1 Flash Lite Image", 0.25, 0.025, 1.5),
 
-	// ── DeepSeek（OpenAI 兼容协议直连官方 API）──
-	// 官方价 2026-08-08 核实：V4-Flash $0.14 / 缓存命中 $0.0028 / $0.28，
+	// ── DeepSeek（OpenAI 兼容协议，经 TokenHub 转发）──
+	// TokenHub 实际基础价（每 1M tokens）为 ¥1 / ¥0.2 / ¥2；按项目固定汇率
+	// ¥6.8/$ 换算为精确美元值。生产分组的 5.644 倍（83 折）由 Core 配置，
+	// 不在这里重复相乘。这样缓存价也保持 TokenHub 的 1:5 比例，避免沿用
+	// 上游公开价的 1:50 缓存折扣而低收费用。
 	// 1M 上下文、最大输出 384K；deepseek-v4-flash 现指向 V4-Flash-0731 公测版。
 	// 不用 std()：DeepSeek 没有 priority/flex 档，std 会凭空造出 ×2/×0.5 档价。
 	"deepseek-v4-flash": {
 		Name:            "DeepSeek V4 Flash",
 		ContextWindow:   1_000_000,
 		MaxOutputTokens: 384_000,
-		InputPrice:      0.14,
-		CachedPrice:     0.0028,
-		OutputPrice:     0.28,
+		InputPrice:      0.14705882352941177,
+		CachedPrice:     0.02941176470588235,
+		OutputPrice:     0.29411764705882354,
 	},
 }
 
@@ -223,7 +226,7 @@ func fallbackByKeyword(id string, reg map[string]Spec) (Spec, bool) {
 	}
 	// 顺序敏感：先细分（codex / mini / image）后粗分（gpt-5 / gpt-4）。
 	// deepseek 必须最先判：变体名可能含 "chat"/"mini" 等关键字，
-	// 掉进 GPT 系兜底价（$2.5/$15 vs $0.14/$0.28）就是十几倍的多收。
+	// 掉进 GPT 系兜底价会让输入多收 17 倍、输出多收 51 倍。
 	switch {
 	case strings.Contains(id, "deepseek"):
 		return reg["deepseek-v4-flash"], true

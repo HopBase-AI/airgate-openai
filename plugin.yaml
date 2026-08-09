@@ -99,9 +99,9 @@ gateway:
       capabilities:
         - chat
         - reasoning
-      input_price: 0.14
-      output_price: 0.28
-      cached_input_price: 0.0028
+      input_price: 0.14705882352941177
+      output_price: 0.29411764705882354
+      cached_input_price: 0.02941176470588235
     - id: gemini-2.5-flash-image
       name: Gemini 2.5 Flash Image
       context_window: 32000
