@@ -18,6 +18,7 @@ const (
 	responsesFailureKindClient             responsesFailureKind = "client"
 	responsesFailureKindContinuationAnchor responsesFailureKind = "continuation_anchor"
 	responsesFailureKindRateLimited        responsesFailureKind = "rate_limited"
+	responsesFailureKindAccountDead        responsesFailureKind = "account_dead"
 	responsesFailureKindServer             responsesFailureKind = "server"
 )
 
@@ -42,6 +43,8 @@ func (e *responsesFailureError) outcomeKind() sdk.OutcomeKind {
 		return sdk.OutcomeClientError
 	case responsesFailureKindRateLimited:
 		return sdk.OutcomeAccountRateLimited
+	case responsesFailureKindAccountDead:
+		return sdk.OutcomeAccountDead
 	case responsesFailureKindServer:
 		return sdk.OutcomeUpstreamTransient
 	default:
@@ -63,6 +66,8 @@ func (e *responsesFailureError) Error() string {
 			return fmt.Sprintf("上游速率限制(建议 %s 后重试): %s", e.RetryAfter, e.Message)
 		}
 		return "上游速率限制: " + e.Message
+	case responsesFailureKindAccountDead:
+		return "上游账号凭证失效: " + e.Message
 	default:
 		return "上游错误: " + e.Message
 	}
@@ -201,6 +206,14 @@ func classifyResponsesError(errType, errCode, msg string) *responsesFailureError
 			AnthropicErrorType: "invalid_request_error",
 			Message:            msg,
 		}
+	case isDefinitiveCredentialFailureText(errType, errCode, msg) || errType == "unauthorized" || errCode == "unauthorized":
+		return &responsesFailureError{
+			Kind:               responsesFailureKindAccountDead,
+			StatusCode:         http.StatusUnauthorized,
+			AnthropicErrorType: "authentication_error",
+			Code:               errCode,
+			Message:            msg,
+		}
 	case containsAny(errType, errCode, msg, "context_length", "context window", "max_tokens", "max_input_tokens", "max_output_tokens", "token limit", "too many tokens"):
 		return &responsesFailureError{
 			Kind:               responsesFailureKindClient,
@@ -229,6 +242,14 @@ func classifyResponsesError(errType, errCode, msg string) *responsesFailureError
 			StatusCode:         http.StatusBadRequest,
 			AnthropicErrorType: "invalid_request_error",
 			Message:            msg,
+		}
+	case isOverloadedText(strings.Join([]string{errType, errCode, msg}, " ")):
+		return &responsesFailureError{
+			Kind:               responsesFailureKindServer,
+			StatusCode:         http.StatusServiceUnavailable,
+			AnthropicErrorType: "overloaded_error",
+			Message:            msg,
+			RetryAfter:         5 * time.Second,
 		}
 	case isTemporaryRateLimitText(errType, errCode, msg) || containsAny(errType, errCode, msg, "usage_limit_reached", "rate_limit_exceeded"):
 		return &responsesFailureError{

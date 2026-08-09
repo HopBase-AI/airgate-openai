@@ -57,6 +57,9 @@ func successOutcome(statusCode int, body []byte, headers http.Header, usage *sdk
 // 会原样保留 Upstream（Body / Headers / StatusCode）供 Core 在 ClientError 路径下透传。
 func failureOutcome(statusCode int, body []byte, headers http.Header, message string, retryAfter time.Duration) sdk.ForwardOutcome {
 	kind := classifyHTTPFailure(statusCode, message)
+	if retryAfter <= 0 && (kind == sdk.OutcomeAccountRateLimited || kind == sdk.OutcomeUpstreamTransient) {
+		retryAfter = defaultRetryAfter(statusCode, message)
+	}
 	reason := message
 	if reason != "" {
 		reason = fmt.Sprintf("HTTP %d: %s", statusCode, message)
@@ -73,6 +76,34 @@ func failureOutcome(statusCode int, body []byte, headers http.Header, message st
 	}
 }
 
+func defaultRetryAfter(statusCode int, message string) time.Duration {
+	switch {
+	case statusCode == http.StatusTooManyRequests:
+		return time.Minute
+	case statusCode == 529:
+		return 5 * time.Second
+	case statusCode >= 500 && isOverloadedText(message):
+		return 5 * time.Second
+	case isTemporaryRateLimitText(message):
+		return 10 * time.Minute
+	default:
+		return 0
+	}
+}
+
+func isOverloadedText(s string) bool {
+	lower := strings.ToLower(strings.TrimSpace(s))
+	if lower == "" {
+		return false
+	}
+	for _, signal := range []string{"server_is_overloaded", "server_overloaded", "service_overloaded", "model_overloaded", "engine_overloaded", "overloaded_error"} {
+		if strings.Contains(lower, signal) {
+			return true
+		}
+	}
+	return strings.Contains(lower, "overloaded")
+}
+
 // transientOutcome 连接级 / 网络层错误（无上游 HTTP 响应），归类为 UpstreamTransient。
 // statusCode 给 0 或 502 均可，Core 不会基于此做判断。
 func transientOutcome(reason string) sdk.ForwardOutcome {
@@ -80,6 +111,23 @@ func transientOutcome(reason string) sdk.ForwardOutcome {
 		Kind:     sdk.OutcomeUpstreamTransient,
 		Upstream: sdk.UpstreamResponse{StatusCode: http.StatusBadGateway},
 		Reason:   reason,
+	}
+}
+
+// streamAbortedOutcome reports a downstream/client-side stream failure without
+// blaming the selected upstream account. Any usage already reported upstream is
+// retained so Core can settle work that was completed before the disconnect.
+func streamAbortedOutcome(err error, usage *sdk.Usage, duration time.Duration) sdk.ForwardOutcome {
+	reason := "响应流已中断"
+	if err != nil {
+		reason = err.Error()
+	}
+	return sdk.ForwardOutcome{
+		Kind:     sdk.OutcomeStreamAborted,
+		Upstream: sdk.UpstreamResponse{StatusCode: http.StatusOK},
+		Reason:   reason,
+		Usage:    usage,
+		Duration: duration,
 	}
 }
 

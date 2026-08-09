@@ -254,6 +254,197 @@ func TestTranslateResponsesSSERecordsDefaultPriority(t *testing.T) {
 	}
 }
 
+func TestTranslateResponsesSSEPostOutputFailurePreservesOutcomeAndUsage(t *testing.T) {
+	tests := []struct {
+		name       string
+		errorJSON  string
+		wantKind   sdk.OutcomeKind
+		retryAfter time.Duration
+	}{
+		{
+			name:       "overload",
+			errorJSON:  `{"type":"service_unavailable_error","code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later."}`,
+			wantKind:   sdk.OutcomeUpstreamTransient,
+			retryAfter: 5 * time.Second,
+		},
+		{
+			name:       "rate limit reset",
+			errorJSON:  `{"type":"usage_limit_reached","code":"rate_limit_exceeded","message":"The usage limit has been reached","resets_in_seconds":23}`,
+			wantKind:   sdk.OutcomeAccountRateLimited,
+			retryAfter: 23 * time.Second,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sse := strings.Join([]string{
+				`data: {"type":"response.created","response":{"id":"resp_limited","model":"gpt-5.4"}}`,
+				`data: {"type":"response.output_text.delta","delta":"visible output"}`,
+				`data: {"type":"response.failed","response":{"usage":{"input_tokens":12,"output_tokens":3,"input_tokens_details":{"cached_tokens":2}},"error":` + tt.errorJSON + `}}`,
+				"",
+			}, "\n")
+			resp := &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+				Body:       io.NopCloser(strings.NewReader(sse)),
+			}
+			w := httptest.NewRecorder()
+
+			outcome, err := translateResponsesSSEToAnthropicSSE(
+				context.Background(),
+				resp,
+				w,
+				"claude-sonnet-4-6",
+				"gpt-5.4",
+				[]byte(`{"model":"claude-sonnet-4-6","stream":true,"messages":[{"role":"user","content":"ping"}]}`),
+				"",
+				"",
+				time.Now(),
+				openAISessionResolution{},
+			)
+			if err != nil {
+				t.Fatalf("translateResponsesSSEToAnthropicSSE error: %v", err)
+			}
+			if outcome.Kind != tt.wantKind {
+				t.Fatalf("Kind = %v, want %v", outcome.Kind, tt.wantKind)
+			}
+			if outcome.RetryAfter != tt.retryAfter {
+				t.Fatalf("RetryAfter = %v, want %v", outcome.RetryAfter, tt.retryAfter)
+			}
+			if outcome.Usage == nil {
+				t.Fatal("Usage = nil, want partial upstream usage")
+			}
+			if got := usageMetricInt(outcome.Usage, usageMetricInputTokens); got != 10 {
+				t.Fatalf("billable uncached input tokens = %d, want 10", got)
+			}
+			if got := usageMetricInt(outcome.Usage, usageMetricCachedInputTokens); got != 2 {
+				t.Fatalf("cached input tokens = %d, want 2", got)
+			}
+			if got := usageMetricInt(outcome.Usage, usageMetricOutputTokens); got != 3 {
+				t.Fatalf("output tokens = %d, want 3", got)
+			}
+			if !strings.Contains(w.Body.String(), "visible output") {
+				t.Fatalf("visible output was not forwarded: %q", w.Body.String())
+			}
+		})
+	}
+}
+
+func TestTranslateResponsesSSEPreOutputOverloadDoesNotCommit(t *testing.T) {
+	tests := []struct {
+		name   string
+		events []string
+	}{
+		{
+			name: "failure without response created",
+			events: []string{
+				`data: {"type":"response.failed","response":{"error":{"type":"service_unavailable_error","code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later."}}}`,
+			},
+		},
+		{
+			name: "buffered response created then failure",
+			events: []string{
+				`data: {"type":"response.created","response":{"id":"resp_limited","model":"gpt-5.4"}}`,
+				`data: {"type":"response.failed","response":{"error":{"type":"service_unavailable_error","code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later."}}}`,
+			},
+		},
+		{
+			name: "ignored upstream tool is not client output",
+			events: []string{
+				`data: {"type":"response.created","response":{"id":"resp_limited","model":"gpt-5.4"}}`,
+				`data: {"type":"response.output_item.added","item":{"type":"web_search_call","id":"search_1"}}`,
+				`data: {"type":"response.failed","response":{"error":{"type":"service_unavailable_error","code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later."}}}`,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resp := &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+				Body:       io.NopCloser(strings.NewReader(strings.Join(tt.events, "\n") + "\n")),
+			}
+			w := newSignalingResponseWriter()
+
+			outcome, err := translateResponsesSSEToAnthropicSSE(
+				context.Background(),
+				resp,
+				w,
+				"claude-sonnet-4-6",
+				"gpt-5.4",
+				[]byte(`{"model":"claude-sonnet-4-6","stream":true,"messages":[{"role":"user","content":"ping"}]}`),
+				"",
+				"",
+				time.Now(),
+				openAISessionResolution{},
+			)
+			if err != nil {
+				t.Fatalf("Core-facing error = %v, want nil classified outcome", err)
+			}
+			if outcome.Kind != sdk.OutcomeUpstreamTransient || outcome.RetryAfter != 5*time.Second {
+				t.Fatalf("outcome = kind:%v retry:%v, want UpstreamTransient/5s", outcome.Kind, outcome.RetryAfter)
+			}
+			if body := w.BodyString(); body != "" {
+				t.Fatalf("pre-output failure committed Anthropic events: %q", body)
+			}
+			w.mu.Lock()
+			status := w.status
+			w.mu.Unlock()
+			if status != 0 {
+				t.Fatalf("writer status = %d, want no WriteHeader before real output", status)
+			}
+		})
+	}
+}
+
+func TestTranslateResponsesSSEDownstreamWriteFailureIsNeutralAndClosesUpstream(t *testing.T) {
+	writers := []struct {
+		name string
+		w    http.ResponseWriter
+	}{
+		{name: "zero byte before first output", w: newFailingResponseWriter(1)},
+		{name: "partial before first output", w: newPartialFailingResponseWriter(9)},
+		{name: "zero byte after first output", w: newFailingResponseWriter(2)},
+	}
+
+	for _, tt := range writers {
+		t.Run(tt.name, func(t *testing.T) {
+			body := &trackingReadCloser{Reader: strings.NewReader(strings.Join([]string{
+				`data: {"type":"response.created","response":{"id":"resp_write","model":"gpt-5.4"}}`,
+				`data: {"type":"response.output_text.delta","delta":"first"}`,
+				`data: {"type":"response.output_text.delta","delta":"second"}`,
+				`data: {"type":"response.completed","response":{"id":"resp_write","model":"gpt-5.4","usage":{"input_tokens":3,"output_tokens":2}}}`,
+				"",
+			}, "\n"))}
+			resp := &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+				Body:       body,
+			}
+
+			outcome, err := translateResponsesSSEToAnthropicSSE(
+				context.Background(), resp, tt.w,
+				"claude-sonnet-4-6", "gpt-5.4",
+				[]byte(`{"model":"claude-sonnet-4-6","stream":true,"messages":[{"role":"user","content":"ping"}]}`),
+				"", "", time.Now(), openAISessionResolution{},
+			)
+			if err != nil {
+				t.Fatalf("Core-facing error = %v, want nil", err)
+			}
+			if outcome.Kind != sdk.OutcomeStreamAborted {
+				t.Fatalf("Kind = %v, want StreamAborted", outcome.Kind)
+			}
+			if !body.closed {
+				t.Fatal("upstream body was not closed after downstream write failure")
+			}
+			if !strings.Contains(outcome.Reason, errTestDownstreamWrite.Error()) {
+				t.Fatalf("Reason = %q, want downstream write error", outcome.Reason)
+			}
+		})
+	}
+}
+
 func TestForwardAnthropicCountTokensReturnsEstimate(t *testing.T) {
 	w := httptest.NewRecorder()
 	req := &sdk.ForwardRequest{

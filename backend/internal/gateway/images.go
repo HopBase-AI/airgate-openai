@@ -1327,7 +1327,7 @@ func (g *OpenAIGateway) forwardImagesViaResponsesTool(ctx context.Context, req *
 	return g.forwardImagesViaResponsesToolWithURL(ctx, req, ChatGPTWSURL)
 }
 
-func (g *OpenAIGateway) forwardImagesViaResponsesToolWithURL(ctx context.Context, req *sdk.ForwardRequest, targetURL string) (sdk.ForwardOutcome, error) {
+func (g *OpenAIGateway) forwardImagesViaResponsesToolWithURL(ctx context.Context, req *sdk.ForwardRequest, targetURL string, keepAliveIntervalOverride ...time.Duration) (sdk.ForwardOutcome, error) {
 	start := time.Now()
 	account := req.Account
 
@@ -1409,13 +1409,25 @@ func (g *OpenAIGateway) forwardImagesViaResponsesToolWithURL(ctx context.Context
 		return transientOutcome(reason), fmt.Errorf("%s", reason)
 	}
 
+	receiveCtx, receiveCancel := context.WithCancel(ctx)
+	defer receiveCancel()
 	var sseKA *ssePingKeepAlive
 	if req.Stream {
-		sseKA = startSSEPingKeepAlive(req.Writer)
+		keepAliveInterval := imageKeepAliveInterval
+		if len(keepAliveIntervalOverride) > 0 && keepAliveIntervalOverride[0] > 0 {
+			keepAliveInterval = keepAliveIntervalOverride[0]
+		}
+		sseKA = startSSEPingKeepAliveWithInterval(req.Writer, keepAliveInterval, func(error) {
+			receiveCancel()
+			_ = conn.Close()
+		})
 	}
 
 	handler := &imagesSilentHandler{accountID: account.ID, start: start}
-	wsResult := ReceiveWSResponse(ctx, conn, handler)
+	wsResult := ReceiveWSResponse(receiveCtx, conn, handler)
+	if downstreamErr := stopSSEPingKeepAlive(sseKA); downstreamErr != nil {
+		return streamAbortedOutcome(downstreamErr, nil, time.Since(start)), nil
+	}
 	if wsResult.ResponseID != "" && session.SessionKey != "" {
 		updateSessionStateResponseID(session.SessionKey, wsResult.ResponseID)
 	}
@@ -1431,11 +1443,6 @@ func (g *OpenAIGateway) forwardImagesViaResponsesToolWithURL(ctx context.Context
 					sseKA.Stop()
 					g.logger.Warn("Images OAuth 上游返回客户端错误，已脱敏响应",
 						"path", reqPath, "model", imgReq.Model, "status_code", failure.StatusCode, "code", failure.Code, "reason", failure.Message)
-					clientMsg := sanitizedImageSSEErrorMessage
-					if failure.StatusCode == http.StatusRequestEntityTooLarge {
-						clientMsg = imageTooLargeSSEErrorMessage
-					}
-					writeSSEErrorIfStarted(req.Writer, sseKA, clientMsg)
 				}
 				return sdk.ForwardOutcome{
 					Kind: sdk.OutcomeClientError,
@@ -1456,7 +1463,6 @@ func (g *OpenAIGateway) forwardImagesViaResponsesToolWithURL(ctx context.Context
 				g.logger.Warn("Images OAuth 流式请求失败，已脱敏响应",
 					"path", reqPath, "model", imgReq.Model, "status_code", failure.StatusCode,
 					"kind", failure.Kind, "retry_after", failure.RetryAfter, "error", wsResult.Err)
-				writeSSEErrorIfStarted(req.Writer, sseKA, sanitizedImageSSEErrorMessage)
 			}
 			errBody := openAIErrorJSON(openAIErrorTypeForStatus(failure.StatusCode), string(failure.Kind), failure.Message)
 			return sdk.ForwardOutcome{
@@ -1472,7 +1478,6 @@ func (g *OpenAIGateway) forwardImagesViaResponsesToolWithURL(ctx context.Context
 			sseKA.Stop()
 			g.logger.Warn("Images OAuth 流式请求失败，已脱敏响应",
 				"path", reqPath, "model", imgReq.Model, "error", wsResult.Err)
-			writeSSEErrorIfStarted(req.Writer, sseKA, sanitizedImageSSEErrorMessage)
 		}
 		return sdk.ForwardOutcome{
 			Kind:     sdk.OutcomeUpstreamTransient,
@@ -1494,7 +1499,6 @@ func (g *OpenAIGateway) forwardImagesViaResponsesToolWithURL(ctx context.Context
 				g.logger.Warn("Images OAuth 图像工具返回客户端错误，已脱敏响应",
 					"path", reqPath, "model", imgReq.Model, "status_code", failure.StatusCode,
 					"code", failure.Code, "reason", reason)
-				writeSSEErrorIfStarted(req.Writer, sseKA, sanitizedImageSSEErrorMessage)
 			}
 			return sdk.ForwardOutcome{
 				Kind: sdk.OutcomeClientError,
@@ -1512,7 +1516,6 @@ func (g *OpenAIGateway) forwardImagesViaResponsesToolWithURL(ctx context.Context
 			sseKA.Stop()
 			g.logger.Warn("Images OAuth 未返回图像结果，已脱敏响应",
 				"path", reqPath, "model", imgReq.Model, "reason", reason)
-			writeSSEErrorIfStarted(req.Writer, sseKA, sanitizedImageSSEErrorMessage)
 		}
 		return sdk.ForwardOutcome{
 			Kind: sdk.OutcomeUpstreamTransient,
@@ -1562,27 +1565,7 @@ func (g *OpenAIGateway) forwardImagesViaResponsesToolWithURL(ctx context.Context
 		"num_images", numImages,
 	)
 
-	respBody := buildImagesRESTResponse(wsResult, promptTokens, 0, billingModel)
-	outcome := sdk.ForwardOutcome{
-		Kind:     sdk.OutcomeSuccess,
-		Upstream: sdk.UpstreamResponse{StatusCode: http.StatusOK},
-		Usage:    usage,
-		Duration: elapsed,
-	}
-	if sseKA != nil {
-		sseKA.Stop()
-		writeImagesRESTSSE(req.Writer, respBody)
-		outcome.Upstream.Headers = http.Header{"Content-Type": []string{"text/event-stream"}}
-	} else {
-		outcome.Upstream.Body = respBody
-		outcome.Upstream.Headers = http.Header{"Content-Type": []string{"application/json"}}
-	}
-
-	// 计费 size 优先级（高 → 低）：
-	//   1. 上游 image_generation_call event 的 size 字段（telemetry 反馈）
-	//   2. 直接解码生成的 base64 图 header 拿真实宽高（auto 时最准的来源——
-	//      上游有时不返 size 字段，但图本身永远是诚实的）
-	//   3. 客户端请求里的 size（最可能是 "auto" 兜底）
+	// 计费 size 优先级（高 → 低）：上游事件、图片真实尺寸、请求 size。
 	billingSize := imgReq.Size
 	if len(wsResult.ImageGenCalls) > 0 {
 		first := wsResult.ImageGenCalls[0]
@@ -1592,8 +1575,26 @@ func (g *OpenAIGateway) forwardImagesViaResponsesToolWithURL(ctx context.Context
 			billingSize = sz
 		}
 	}
-	// 图片尺寸作为通用 UsageAttribute 入库，后台费用明细可用它解释 1K/2K/4K 分档。
 	fillUsageCostPerImageBySize(usage, numImages, billingSize, imgReq.Quality)
+
+	respBody := buildImagesRESTResponse(wsResult, promptTokens, 0, billingModel)
+	outcome := sdk.ForwardOutcome{
+		Kind:     sdk.OutcomeSuccess,
+		Upstream: sdk.UpstreamResponse{StatusCode: http.StatusOK},
+		Usage:    usage,
+		Duration: elapsed,
+	}
+	if sseKA != nil {
+		if err := writeImagesRESTSSE(req.Writer, respBody); err != nil {
+			downstreamErr := newDownstreamWriteError(fmt.Errorf("写入客户端 Images SSE 失败: %w", err))
+			return streamAbortedOutcome(downstreamErr, usage, elapsed), nil
+		}
+		outcome.Upstream.Headers = http.Header{"Content-Type": []string{"text/event-stream"}}
+	} else {
+		outcome.Upstream.Body = respBody
+		outcome.Upstream.Headers = http.Header{"Content-Type": []string{"application/json"}}
+	}
+
 	return outcome, nil
 }
 
@@ -1712,11 +1713,12 @@ func handleImagesResponseWithLogger(logger *slog.Logger, resp *http.Response, w 
 	if err != nil {
 		reason := fmt.Sprintf("读取 Images 响应失败: %v", err)
 		if sseKA != nil {
-			sseKA.Stop()
+			if downstreamErr := stopSSEPingKeepAlive(sseKA); downstreamErr != nil {
+				return streamAbortedOutcome(downstreamErr, nil, time.Since(start)), nil
+			}
 			if logger != nil {
 				logger.Warn("Images APIKey 响应读取失败，已脱敏响应", "model", fallbackModel, "error", err)
 			}
-			writeSSEErrorIfStarted(w, sseKA, sanitizedImageSSEErrorMessage)
 		}
 		return transientOutcome(reason), fmt.Errorf("%s", reason)
 	}
@@ -1724,17 +1726,6 @@ func handleImagesResponseWithLogger(logger *slog.Logger, resp *http.Response, w 
 
 	parsed := parseUsage(body)
 	headers := resp.Header.Clone()
-
-	if sseKA != nil {
-		sseKA.Stop()
-		writeImagesRESTSSE(w, body)
-	} else if w != nil {
-		if ct := resp.Header.Get("Content-Type"); ct != "" {
-			w.Header().Set("Content-Type", ct)
-		}
-		w.WriteHeader(resp.StatusCode)
-		_, _ = w.Write(body)
-	}
 
 	modelName := strings.TrimSpace(gjson.GetBytes(body, "model").String())
 	if modelName == "" {
@@ -1776,6 +1767,22 @@ func handleImagesResponseWithLogger(logger *slog.Logger, resp *http.Response, w 
 	elapsed := time.Since(start)
 	usage := newTokenUsage(modelName, "", parsed.inputTokens, parsed.outputTokens, parsed.cachedInputTokens, 0, elapsed.Milliseconds())
 	fillUsageCostPerImageBySize(usage, numImages, billSize, "")
+
+	if sseKA != nil {
+		if downstreamErr := stopSSEPingKeepAlive(sseKA); downstreamErr != nil {
+			return streamAbortedOutcome(downstreamErr, usage, elapsed), nil
+		}
+		if err := writeImagesRESTSSE(w, body); err != nil {
+			downstreamErr := newDownstreamWriteError(fmt.Errorf("写入客户端 Images SSE 失败: %w", err))
+			return streamAbortedOutcome(downstreamErr, usage, elapsed), nil
+		}
+	} else if w != nil {
+		if ct := resp.Header.Get("Content-Type"); ct != "" {
+			w.Header().Set("Content-Type", ct)
+		}
+		w.WriteHeader(resp.StatusCode)
+		_, _ = w.Write(body)
+	}
 
 	outcome := sdk.ForwardOutcome{
 		Kind:     sdk.OutcomeSuccess,

@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -182,6 +183,35 @@ func TestStoreCodexUsagePreservesBaseWindowResetMetadata(t *testing.T) {
 	}
 	if snapshot.BengalfoxSecondaryUsedPercent != 18 || snapshot.BengalfoxSecondaryWindowMinutes != 7*24*60 {
 		t.Fatalf("bengalfox secondary window not preserved: %+v", snapshot)
+	}
+}
+
+func TestBuildCodexUsageWindows_ModelWindowsAreDisplayOnly(t *testing.T) {
+	now := time.Date(2026, 8, 9, 12, 0, 0, 0, time.UTC)
+	snapshot := &CodexUsageSnapshot{
+		PrimaryUsedPercent:                  25,
+		PrimaryResetAfterSeconds:            2 * 60 * 60,
+		SecondaryUsedPercent:                40,
+		SecondaryResetAfterSeconds:          7 * 24 * 60 * 60,
+		BengalfoxPrimaryUsedPercent:         100,
+		BengalfoxPrimaryResetAfterSeconds:   30 * 60,
+		BengalfoxSecondaryUsedPercent:       50,
+		BengalfoxSecondaryResetAfterSeconds: 7 * 24 * 60 * 60,
+		BengalfoxSecondaryWindowMinutes:     7 * 24 * 60,
+		CapturedAt:                          now,
+		LimitName:                           "gpt-5.6-sol",
+	}
+
+	windows := buildCodexUsageWindows(snapshot, snapshot.LimitName, now)
+	if len(windows) != 4 {
+		t.Fatalf("windows len = %d, want 4", len(windows))
+	}
+
+	for _, window := range windows {
+		isModelWindow := strings.HasPrefix(window.Key, "model:")
+		if window.IgnoreLimit != isModelWindow {
+			t.Fatalf("window %q IgnoreLimit = %v, want %v", window.Key, window.IgnoreLimit, isModelWindow)
+		}
 	}
 }
 

@@ -237,7 +237,7 @@ fallbackCheck:
 			return outcome, err
 		}
 		// 非模型错误：写回原始错误
-		return g.writeAnthropicUpstreamError(req.Writer, outcome.Upstream.StatusCode, errBody, start)
+		return g.writeAnthropicUpstreamError(req.Writer, outcome.Upstream.StatusCode, outcome.Upstream.Headers, errBody, start)
 	}
 
 	return outcome, nil
@@ -381,7 +381,7 @@ func (g *OpenAIGateway) forwardAnthropicResponses(
 			outcome.Duration = time.Since(start)
 			return outcome, body, nil
 		}
-		outcome, err := g.writeAnthropicUpstreamError(w, resp.StatusCode, body, start)
+		outcome, err := g.writeAnthropicUpstreamError(w, resp.StatusCode, resp.Header, body, start)
 		return outcome, nil, err
 	}
 
@@ -581,6 +581,7 @@ func (g *OpenAIGateway) handleAnthropicNonStreamFromResponses(
 func (g *OpenAIGateway) writeAnthropicUpstreamError(
 	w http.ResponseWriter,
 	statusCode int,
+	headers http.Header,
 	body []byte,
 	start time.Time,
 ) (sdk.ForwardOutcome, error) {
@@ -590,16 +591,23 @@ func (g *OpenAIGateway) writeAnthropicUpstreamError(
 	}
 
 	kind := classifyAnthropicBody(statusCode, body)
-	retryAfter := time.Duration(0)
-	if statusCode == 429 {
+	retryAfter := extractRetryAfterHeader(headers)
+	if retryAfter <= 0 && statusCode == http.StatusTooManyRequests {
 		retryAfter = parseRetryDelay(errMsg)
+	}
+	if retryAfter <= 0 && (kind == sdk.OutcomeAccountRateLimited || kind == sdk.OutcomeUpstreamTransient) {
+		retryAfter = defaultRetryAfter(statusCode, errMsg)
 	}
 
 	errBody := anthropicErrorJSON(anthropicErrorType(statusCode), errMsg)
+	upstreamHeaders := http.Header{"Content-Type": []string{"application/json"}}
+	if retryAfterValues := headers.Values("Retry-After"); len(retryAfterValues) > 0 {
+		upstreamHeaders["Retry-After"] = append([]string(nil), retryAfterValues...)
+	}
 
 	outcome := sdk.ForwardOutcome{
 		Kind:       kind,
-		Upstream:   sdk.UpstreamResponse{StatusCode: statusCode, Headers: http.Header{"Content-Type": []string{"application/json"}}, Body: errBody},
+		Upstream:   sdk.UpstreamResponse{StatusCode: statusCode, Headers: upstreamHeaders, Body: errBody},
 		Reason:     errMsg,
 		RetryAfter: retryAfter,
 		Duration:   time.Since(start),

@@ -16,11 +16,15 @@ type quotaInfo struct {
 
 // accountUsageWindow 是 OpenAI 插件私有的账号用量窗口。
 type accountUsageWindow struct {
-	Key               string  `json:"key"`
-	Label             string  `json:"label"`
-	DisplayLabel      string  `json:"display_label,omitempty"`
-	Slot              string  `json:"slot,omitempty"`
-	Group             string  `json:"group,omitempty"`
+	Key          string `json:"key"`
+	Label        string `json:"label"`
+	DisplayLabel string `json:"display_label,omitempty"`
+	Slot         string `json:"slot,omitempty"`
+	Group        string `json:"group,omitempty"`
+	// IgnoreLimit keeps display-only model sub-windows from being promoted to an
+	// account-wide scheduler limit by Core. A model-specific quota must not take
+	// unrelated models on the same credential offline.
+	IgnoreLimit       bool    `json:"ignore_limit,omitempty"`
 	UsedPercent       float64 `json:"used_percent"`
 	ResetAt           string  `json:"reset_at,omitempty"`
 	ResetAfterSeconds int     `json:"reset_after_seconds,omitempty"`
@@ -59,7 +63,7 @@ func resetAtFromBase(base time.Time, resetAfterSeconds int) *time.Time {
 	return &resetAt
 }
 
-func newAccountUsageWindow(key, label string, usedPercent float64, resetAt *time.Time, now time.Time) accountUsageWindow {
+func newAccountUsageWindow(key, label string, usedPercent float64, resetAt *time.Time, now time.Time, ignoreLimit bool) accountUsageWindow {
 	slot := usageWindowSlot(key, label)
 	window := accountUsageWindow{
 		Key:          key,
@@ -67,6 +71,7 @@ func newAccountUsageWindow(key, label string, usedPercent float64, resetAt *time
 		DisplayLabel: slot,
 		Slot:         slot,
 		Group:        usageWindowGroup(key, label, slot),
+		IgnoreLimit:  ignoreLimit,
 		UsedPercent:  usedPercent,
 		UpdatedAt:    now.UTC().Format(time.RFC3339),
 	}

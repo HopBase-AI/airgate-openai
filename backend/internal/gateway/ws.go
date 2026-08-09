@@ -114,6 +114,75 @@ type WSEventHandler interface {
 	OnRateLimits(usedPercent float64)
 }
 
+type wsEventHandlerWithError interface {
+	Err() error
+}
+
+// downstreamWriteError distinguishes a broken client connection from an
+// upstream/account failure so the scheduler never penalizes or replays it.
+type downstreamWriteError struct {
+	cause error
+}
+
+func (e *downstreamWriteError) Error() string { return e.cause.Error() }
+func (e *downstreamWriteError) Unwrap() error { return e.cause }
+
+func newDownstreamWriteError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &downstreamWriteError{cause: err}
+}
+
+func wsEventHandlerError(handler WSEventHandler) error {
+	withError, ok := handler.(wsEventHandlerWithError)
+	if !ok {
+		return nil
+	}
+	return withError.Err()
+}
+
+func wsEventIsTerminalFailure(eventType string, data []byte) bool {
+	switch eventType {
+	case "response.failed", "error":
+		return true
+	case "response.incomplete":
+		return gjson.GetBytes(data, "response.incomplete_details.reason").String() != "max_output_tokens"
+	default:
+		return false
+	}
+}
+
+func wsEventIsSuccessfulCompletion(eventType string, data []byte) bool {
+	switch eventType {
+	case "response.completed", "response.done":
+		return true
+	case "response.incomplete":
+		return gjson.GetBytes(data, "response.incomplete_details.reason").String() == "max_output_tokens"
+	default:
+		return false
+	}
+}
+
+func startWSContextWatcher(ctx context.Context, conn *websocket.Conn) func() {
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		select {
+		case <-ctx.Done():
+			// Closing is not vulnerable to a later SetReadDeadline overwriting the
+			// cancellation signal and reliably interrupts a blocked ReadMessage.
+			_ = conn.Close()
+		case <-stop:
+		}
+	}()
+	return func() {
+		close(stop)
+		<-done
+	}
+}
+
 // DialWebSocket 建立到上游的 WebSocket 连接
 func DialWebSocket(cfg WSConfig) (*websocket.Conn, *http.Response, error) {
 	targetURL := cfg.URL
@@ -233,6 +302,8 @@ func ReceiveWSResponse(ctx context.Context, conn *websocket.Conn, handler WSEven
 	result := WSResult{}
 	var textBuilder strings.Builder
 	var reasoningBuilder strings.Builder
+	stopContextWatcher := startWSContextWatcher(ctx, conn)
+	defer stopContextWatcher()
 
 	for {
 		// 检查 context
@@ -245,13 +316,21 @@ func ReceiveWSResponse(ctx context.Context, conn *websocket.Conn, handler WSEven
 		}
 
 		if err := conn.SetReadDeadline(time.Now().Add(300 * time.Second)); err != nil {
-			result.Err = fmt.Errorf("设置 WebSocket 读取超时失败: %w", err)
+			if ctx.Err() != nil {
+				result.Err = ctx.Err()
+			} else {
+				result.Err = fmt.Errorf("设置 WebSocket 读取超时失败: %w", err)
+			}
 			break
 		}
 
 		_, msg, err := conn.ReadMessage()
 		if err != nil {
-			result.Err = fmt.Errorf("读取 WebSocket 消息失败: %w", err)
+			if ctx.Err() != nil {
+				result.Err = ctx.Err()
+			} else {
+				result.Err = fmt.Errorf("读取 WebSocket 消息失败: %w", err)
+			}
 			break
 		}
 
@@ -265,6 +344,11 @@ func ReceiveWSResponse(ctx context.Context, conn *websocket.Conn, handler WSEven
 		// 通知 handler 原始事件
 		if handler != nil {
 			handler.OnRawEvent(eventType, msg)
+			if err := wsEventHandlerError(handler); err != nil {
+				result.Err = err
+				finalizeWSResult(&result, &textBuilder, &reasoningBuilder, start)
+				return result
+			}
 		}
 
 		switch eventType {
@@ -278,6 +362,11 @@ func ReceiveWSResponse(ctx context.Context, conn *websocket.Conn, handler WSEven
 				textBuilder.WriteString(delta)
 				if handler != nil {
 					handler.OnTextDelta(delta)
+					if err := wsEventHandlerError(handler); err != nil {
+						result.Err = err
+						finalizeWSResult(&result, &textBuilder, &reasoningBuilder, start)
+						return result
+					}
 				}
 			}
 
@@ -286,6 +375,11 @@ func ReceiveWSResponse(ctx context.Context, conn *websocket.Conn, handler WSEven
 				reasoningBuilder.WriteString(delta)
 				if handler != nil {
 					handler.OnReasoningDelta(delta)
+					if err := wsEventHandlerError(handler); err != nil {
+						result.Err = err
+						finalizeWSResult(&result, &textBuilder, &reasoningBuilder, start)
+						return result
+					}
 				}
 			}
 
@@ -369,6 +463,11 @@ func ReceiveWSResponse(ctx context.Context, conn *websocket.Conn, handler WSEven
 					if primary, ok := rateLimits["primary"].(map[string]any); ok {
 						if used, ok := primary["used_percent"].(float64); ok {
 							handler.OnRateLimits(used)
+							if err := wsEventHandlerError(handler); err != nil {
+								result.Err = err
+								finalizeWSResult(&result, &textBuilder, &reasoningBuilder, start)
+								return result
+							}
 						}
 					}
 				}
