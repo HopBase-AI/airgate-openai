@@ -5,7 +5,7 @@ import "testing"
 // TestDeepSeekV4Flash TokenHub 基础价与元数据。
 // TokenHub 价为 ¥1/¥0.2/¥2（每 1M tokens），按 ¥6.8/$ 换算为下列美元值。
 func TestDeepSeekV4Flash(t *testing.T) {
-	const id = "deepseek-v4-flash"
+	const id = "deepseek-v4-flash-202605"
 	spec, registered := registry[id]
 	if !registered {
 		t.Fatalf("%s 未显式注册", id)
@@ -28,8 +28,8 @@ func TestDeepSeekV4Flash(t *testing.T) {
 	if s := seriesForModel(id); s != "deepseek-v4" {
 		t.Fatalf("%s series = %q", id, s)
 	}
-	if _, registered := registry["deepseek-v4-flash-202605"]; registered {
-		t.Fatal("未经 TokenHub 配置证明的 deepseek-v4-flash-202605 不应注册")
+	if _, registered := registry["deepseek-v4-flash"]; registered {
+		t.Fatal("旧的无后缀 DeepSeek 别名不应注册")
 	}
 }
 
@@ -40,7 +40,7 @@ func TestDeepSeekVariantFallback(t *testing.T) {
 		if spec.InputPrice != 0.14705882352941177 ||
 			spec.CachedPrice != 0.02941176470588235 ||
 			spec.OutputPrice != 0.29411764705882354 {
-			t.Fatalf("%s 应按 deepseek-v4-flash TokenHub 价推断, got input/cached/output=%v/%v/%v (%s)",
+			t.Fatalf("%s 应按 deepseek-v4-flash-202605 TokenHub 价推断, got input/cached/output=%v/%v/%v (%s)",
 				id, spec.InputPrice, spec.CachedPrice, spec.OutputPrice, spec.Name)
 		}
 	}

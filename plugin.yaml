@@ -92,7 +92,7 @@ gateway:
       path: /responses
       description: Responses API WebSocket（无 /v1 前缀）
   models:
-    - id: deepseek-v4-flash
+    - id: deepseek-v4-flash-202605
       name: DeepSeek V4 Flash
       context_window: 1000000
       max_output_tokens: 384000

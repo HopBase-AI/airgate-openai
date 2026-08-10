@@ -24,7 +24,7 @@ var overlayStore atomic.Pointer[catalogOverlay]
 // reaching an unintended upstream route.
 func IsRetired(modelID string) bool {
 	switch normalizeID(modelID) {
-	case "deepseek-v4-flash-202605":
+	case "deepseek-v4-flash":
 		return true
 	default:
 		return false
