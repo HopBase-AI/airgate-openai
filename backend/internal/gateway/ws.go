@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -247,19 +248,37 @@ func dialWebSocket(targetURL, proxyURL string, headers http.Header) (*websocket.
 	return conn, resp, nil
 }
 
+type webSocketDialError struct {
+	message      string
+	responseBody []byte
+	cause        error
+}
+
+func (e *webSocketDialError) Error() string { return e.message }
+func (e *webSocketDialError) Unwrap() error { return e.cause }
+
+func webSocketDialFailureBody(err error) []byte {
+	var dialErr *webSocketDialError
+	if !errors.As(err, &dialErr) || len(dialErr.responseBody) == 0 {
+		return nil
+	}
+	return append([]byte(nil), dialErr.responseBody...)
+}
+
 func formatWebSocketDialError(resp *http.Response, err error) error {
 	if resp != nil {
 		// 尝试读取上游响应体中的错误详情
 		upstreamMsg := ""
+		var responseBody []byte
 		if resp.Body != nil {
+			defer func() { _ = resp.Body.Close() }()
 			if body, readErr := io.ReadAll(resp.Body); readErr == nil && len(body) > 0 {
-				// 尝试提取 JSON 中的 error.message
-				if msg := gjson.GetBytes(body, "error.message").String(); msg != "" {
-					upstreamMsg = msg
-				} else {
-					upstreamMsg = truncate(string(body), 200)
-				}
+				responseBody = append([]byte(nil), body...)
+				upstreamMsg = failureClassificationText(body, "")
 			}
+		}
+		wrap := func(message string) error {
+			return &webSocketDialError{message: message, responseBody: responseBody, cause: err}
 		}
 		hint := ""
 		switch resp.StatusCode {
@@ -272,14 +291,14 @@ func formatWebSocketDialError(resp *http.Response, err error) error {
 		}
 		if hint != "" {
 			if upstreamMsg != "" {
-				return fmt.Errorf("%s: %s (HTTP %d)", hint, upstreamMsg, resp.StatusCode)
+				return wrap(fmt.Sprintf("%s: %s (HTTP %d)", hint, upstreamMsg, resp.StatusCode))
 			}
-			return fmt.Errorf("%s (HTTP %d)", hint, resp.StatusCode)
+			return wrap(fmt.Sprintf("%s (HTTP %d)", hint, resp.StatusCode))
 		}
 		if upstreamMsg != "" {
-			return fmt.Errorf("WebSocket 握手失败: %s (HTTP %d)", upstreamMsg, resp.StatusCode)
+			return wrap(fmt.Sprintf("WebSocket 握手失败: %s (HTTP %d)", upstreamMsg, resp.StatusCode))
 		}
-		return fmt.Errorf("WebSocket 握手失败 (HTTP %d): %w", resp.StatusCode, err)
+		return wrap(fmt.Sprintf("WebSocket 握手失败 (HTTP %d): %v", resp.StatusCode, err))
 	}
 	return fmt.Errorf("WebSocket 连接失败: %w", err)
 }

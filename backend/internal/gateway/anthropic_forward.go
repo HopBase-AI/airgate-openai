@@ -596,7 +596,7 @@ func (g *OpenAIGateway) writeAnthropicUpstreamError(
 		retryAfter = parseRetryDelay(errMsg)
 	}
 	if retryAfter <= 0 && (kind == sdk.OutcomeAccountRateLimited || kind == sdk.OutcomeUpstreamTransient) {
-		retryAfter = defaultRetryAfter(statusCode, errMsg)
+		retryAfter = defaultRetryAfterForKind(kind, statusCode, failureClassificationText(body, errMsg))
 	}
 
 	errBody := anthropicErrorJSON(anthropicErrorType(statusCode), errMsg)

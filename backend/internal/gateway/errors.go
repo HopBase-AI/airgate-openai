@@ -20,7 +20,7 @@ import (
 // classifyHTTPFailure 把 HTTP 状态码 + 错误文本归一化为 OutcomeKind。
 // 返回的 Kind 决定 Core 如何处置账号：
 //
-//	429 → AccountRateLimited
+//	429 → AccountRateLimited，除非结构化错误明确表示上游 overload
 //	401 / 403 → AccountDead（附加消息关键词检查"usage limit" / "rate limit" 等会降级为 RateLimited）
 //	400 + 消息含限流关键词 → AccountRateLimited（部分上游用 400 返回 usage_limit_reached）
 //	400 + 消息含 disabled/deactivated → AccountDead
@@ -35,13 +35,19 @@ func classifyHTTPFailure(statusCode int, message string) sdk.OutcomeKind {
 	if statusCode == http.StatusGatewayTimeout {
 		return sdk.OutcomeClientError
 	}
+	// Specific rate-limit wording wins over overload prose. Structured error
+	// codes/types are handled separately by classifyHTTPFailureBody, where the
+	// machine-readable signal has priority over this message fallback.
+	if isDefinitiveRateLimitText(message) && (statusCode == 400 || statusCode == 403 || statusCode == 429) {
+		return sdk.OutcomeAccountRateLimited
+	}
+	if isOverloadedText(message) && (statusCode == http.StatusTooManyRequests || statusCode >= 500) {
+		return sdk.OutcomeUpstreamTransient
+	}
 	if isTemporaryRateLimitText(message) && (statusCode == 400 || statusCode == 403 || statusCode == 429) {
 		return sdk.OutcomeAccountRateLimited
 	}
 	if statusCode == 529 {
-		return sdk.OutcomeUpstreamTransient
-	}
-	if statusCode >= 500 && isOverloadedText(message) {
 		return sdk.OutcomeUpstreamTransient
 	}
 	if isDisabledAccountText(message) && (statusCode == 400 || statusCode == 403) {
@@ -68,10 +74,75 @@ func classifyAnthropicBody(statusCode int, body []byte) sdk.OutcomeKind {
 	if msg == "" {
 		msg = string(body)
 	}
-	return classifyHTTPFailure(statusCode, msg)
+	return classifyHTTPFailureBody(statusCode, body, msg)
 }
 
-func isTemporaryRateLimitText(parts ...string) bool {
+// classifyHTTPFailureBody gives machine-readable error.code/error.type
+// precedence over prose and transport status. Providers sometimes return an
+// overload inside HTTP 429, while real credential limits may mention an
+// overloaded model in their human-readable message.
+func classifyHTTPFailureBody(statusCode int, body []byte, fallback string) sdk.OutcomeKind {
+	if statusCode != http.StatusGatewayTimeout {
+		for _, path := range []string{"error.code", "response.error.code", "code", "error.type", "response.error.type", "type"} {
+			if kind, ok := classifyStructuredHTTPFailure(statusCode, gjson.GetBytes(body, path).String()); ok {
+				return kind
+			}
+		}
+	}
+	return classifyHTTPFailure(statusCode, failureClassificationText(body, fallback))
+}
+
+func classifyStructuredHTTPFailure(statusCode int, signal string) (sdk.OutcomeKind, bool) {
+	signal = strings.TrimSpace(signal)
+	if signal == "" {
+		return sdk.OutcomeUnknown, false
+	}
+	if isOverloadMachineSignal(signal) && (statusCode == http.StatusTooManyRequests || statusCode >= 500) {
+		return sdk.OutcomeUpstreamTransient, true
+	}
+	if isRateLimitMachineSignal(signal) && (statusCode == 400 || statusCode == 403 || statusCode == 429) {
+		return sdk.OutcomeAccountRateLimited, true
+	}
+	if isClientRequestMachineSignal(signal) && statusCode >= http.StatusBadRequest && statusCode < http.StatusInternalServerError {
+		return sdk.OutcomeClientError, true
+	}
+	return sdk.OutcomeUnknown, false
+}
+
+// failureClassificationText preserves machine-readable provider semantics for
+// HTTP failure paths. Relays are inconsistent about transport status, so the
+// structured type/code must be considered before falling back to prose.
+func failureClassificationText(body []byte, fallback string) string {
+	parts := make([]string, 0, 10)
+	seen := make(map[string]struct{}, 10)
+	appendPart := func(value string) {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return
+		}
+		key := strings.ToLower(value)
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		parts = append(parts, value)
+	}
+
+	for _, path := range []string{
+		"error.type", "error.code", "error.message",
+		"response.error.type", "response.error.code", "response.error.message",
+		"type", "code", "message",
+	} {
+		appendPart(gjson.GetBytes(body, path).String())
+	}
+	if len(parts) == 0 && len(body) > 0 {
+		appendPart(truncate(string(body), 500))
+	}
+	appendPart(fallback)
+	return strings.Join(parts, " ")
+}
+
+func isDefinitiveRateLimitText(parts ...string) bool {
 	combined := strings.ToLower(strings.Join(parts, " "))
 	if combined == "" {
 		return false
@@ -81,11 +152,41 @@ func isTemporaryRateLimitText(parts ...string) bool {
 		strings.Contains(combined, "too many requests") ||
 		strings.Contains(combined, "quota exceeded") ||
 		strings.Contains(combined, "insufficient quota") ||
-		strings.Contains(combined, "insufficient_quota") ||
 		strings.Contains(combined, "billing hard limit") ||
-		strings.Contains(combined, "billing_hard_limit_reached") ||
 		strings.Contains(combined, "slow down") ||
-		strings.Contains(combined, "slow_down") ||
+		strings.Contains(combined, "request limit exceeded")
+}
+
+func isOverloadMachineSignal(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "server_is_overloaded", "server_overloaded", "service_overloaded", "model_overloaded", "engine_overloaded", "overloaded_error":
+		return true
+	}
+	return false
+}
+
+func isRateLimitMachineSignal(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "rate_limit_error", "rate_limit_exceeded", "usage_limit_reached", "too_many_requests", "insufficient_quota", "quota_exceeded", "billing_hard_limit_reached", "billing_not_active", "slow_down":
+		return true
+	}
+	return false
+}
+
+func isClientRequestMachineSignal(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "invalid_request_error", "invalid_request", "unknown_parameter", "invalid_parameter", "unsupported_parameter", "context_length_exceeded", "input_too_long", "content_policy_violation", "model_not_found", "model_not_supported":
+		return true
+	}
+	return false
+}
+
+func isTemporaryRateLimitText(parts ...string) bool {
+	combined := strings.ToLower(strings.Join(parts, " "))
+	if combined == "" {
+		return false
+	}
+	return isDefinitiveRateLimitText(combined) ||
 		strings.Contains(combined, "try again later") ||
 		strings.Contains(combined, "try again in") ||
 		strings.Contains(combined, "retry after")
