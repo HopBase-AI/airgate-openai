@@ -169,9 +169,9 @@ var registry = map[string]Spec{
 	// ¥6.8/$ 换算为精确美元值。生产分组的 5.644 倍（83 折）由 Core 配置，
 	// 不在这里重复相乘。这样缓存价也保持 TokenHub 的 1:5 比例，避免沿用
 	// 上游公开价的 1:50 缓存折扣而低收费用。
-	// 生产仅发布用户 TokenHub 实例实际配置的 deepseek-v4-flash。不要注册未经
-	// 腾讯配置证明的版本别名，避免请求误路由到未购买优惠的其它线路。
-	"deepseek-v4-flash": deepSeekFlash("DeepSeek V4 Flash"),
+	// 生产仅发布腾讯 TokenHub 自部署优惠线路已实测可用的正式版本。不要注册旧
+	// 无后缀别名，避免请求误路由到未购买优惠的官方直连线路。
+	"deepseek-v4-flash-202605": deepSeekFlash("DeepSeek V4 Flash"),
 }
 
 // DefaultSpec 未注册模型的最终兜底值。按 gpt-5.4 标准档计价——宁可略高也不能 0。
@@ -235,7 +235,7 @@ func fallbackByKeyword(id string, reg map[string]Spec) (Spec, bool) {
 	// 掉进 GPT 系兜底价会让输入多收 17 倍、输出多收 51 倍。
 	switch {
 	case strings.Contains(id, "deepseek"):
-		return reg["deepseek-v4-flash"], true
+		return reg["deepseek-v4-flash-202605"], true
 	case strings.Contains(id, "codex"):
 		return reg["gpt-5.4"], true
 	case strings.Contains(id, "image"):

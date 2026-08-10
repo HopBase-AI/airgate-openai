@@ -24,30 +24,30 @@ func TestForwardAPIKeyDeepSeekChatStreamAlwaysRequestsUsage(t *testing.T) {
 	}{
 		{
 			name:         "absent",
-			requestModel: "deepseek-v4-flash",
-			body:         `{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"hi"}],"stream":true}`,
+			requestModel: "deepseek-v4-flash-202605",
+			body:         `{"model":"deepseek-v4-flash-202605","messages":[{"role":"user","content":"hi"}],"stream":true}`,
 		},
 		{
 			name:         "explicit false",
-			requestModel: "deepseek-v4-flash",
-			body:         `{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"hi"}],"stream":true,"stream_options":{"include_usage":false}}`,
+			requestModel: "deepseek-v4-flash-202605",
+			body:         `{"model":"deepseek-v4-flash-202605","messages":[{"role":"user","content":"hi"}],"stream":true,"stream_options":{"include_usage":false}}`,
 		},
 		{
 			name:            "explicit true",
-			requestModel:    "deepseek-v4-flash",
-			body:            `{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"hi"}],"stream":true,"stream_options":{"include_usage":true}}`,
+			requestModel:    "deepseek-v4-flash-202605",
+			body:            `{"model":"deepseek-v4-flash-202605","messages":[{"role":"user","content":"hi"}],"stream":true,"stream_options":{"include_usage":true}}`,
 			wantClientUsage: true,
 		},
 		{
 			name:              "preserves other stream options",
-			requestModel:      "deepseek-v4-flash",
-			body:              `{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"hi"}],"stream":true,"stream_options":{"vendor_trace":"keep"}}`,
+			requestModel:      "deepseek-v4-flash-202605",
+			body:              `{"model":"deepseek-v4-flash-202605","messages":[{"role":"user","content":"hi"}],"stream":true,"stream_options":{"vendor_trace":"keep"}}`,
 			preservedJSONPath: "stream_options.vendor_trace",
 			preservedValue:    "keep",
 		},
 		{
 			name: "model from body",
-			body: `{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"hi"}],"stream":true}`,
+			body: `{"model":"deepseek-v4-flash-202605","messages":[{"role":"user","content":"hi"}],"stream":true}`,
 		},
 	}
 
@@ -90,8 +90,8 @@ func TestForwardAPIKeyDeepSeekChatStreamAlwaysRequestsUsage(t *testing.T) {
 			}
 
 			upstreamBody := <-requestBody
-			if got := gjson.GetBytes(upstreamBody, "model").String(); got != "deepseek-v4-flash" {
-				t.Fatalf("upstream model = %q, want deepseek-v4-flash; body=%s", got, upstreamBody)
+			if got := gjson.GetBytes(upstreamBody, "model").String(); got != "deepseek-v4-flash-202605" {
+				t.Fatalf("upstream model = %q, want deepseek-v4-flash-202605; body=%s", got, upstreamBody)
 			}
 			if !gjson.GetBytes(upstreamBody, "stream_options.include_usage").Bool() {
 				t.Fatalf("upstream include_usage = false; body=%s", upstreamBody)
@@ -138,13 +138,13 @@ func TestForwardHTTPRejectsRetiredDeepSeekAliasBeforeUpstream(t *testing.T) {
 			"api_key":  "test-key",
 			"base_url": server.URL,
 		}},
-		Model: "deepseek-v4-flash-202605",
+		Model: "deepseek-v4-flash",
 		Headers: http.Header{
 			"Content-Type":       []string{"application/json"},
 			"X-Forwarded-Method": []string{http.MethodPost},
 			"X-Forwarded-Path":   []string{"/v1/chat/completions"},
 		},
-		Body: []byte(`{"model":"deepseek-v4-flash-202605","messages":[{"role":"user","content":"hi"}]}`),
+		Body: []byte(`{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"hi"}]}`),
 	}
 
 	outcome, err := gateway.forwardHTTP(context.Background(), request)
@@ -154,7 +154,7 @@ func TestForwardHTTPRejectsRetiredDeepSeekAliasBeforeUpstream(t *testing.T) {
 	if outcome.Kind != sdk.OutcomeClientError || outcome.Upstream.StatusCode != http.StatusBadRequest {
 		t.Fatalf("outcome = kind %v status %d, want client error 400", outcome.Kind, outcome.Upstream.StatusCode)
 	}
-	if !strings.Contains(string(outcome.Upstream.Body), "deepseek-v4-flash") {
+	if !strings.Contains(string(outcome.Upstream.Body), "deepseek-v4-flash-202605") {
 		t.Fatalf("error body must identify the configured model: %s", outcome.Upstream.Body)
 	}
 	select {
@@ -230,7 +230,7 @@ func TestForwardAPIKeyDeepSeekChatStreamKeepsFinishChunkWhenSuppressingEmbeddedU
 			"api_key":  "test-key",
 			"base_url": server.URL,
 		}},
-		Model:  "deepseek-v4-flash",
+		Model:  "deepseek-v4-flash-202605",
 		Stream: true,
 		Writer: writer,
 		Headers: http.Header{
@@ -238,7 +238,7 @@ func TestForwardAPIKeyDeepSeekChatStreamKeepsFinishChunkWhenSuppressingEmbeddedU
 			"X-Forwarded-Method": []string{http.MethodPost},
 			"X-Forwarded-Path":   []string{"/v1/chat/completions"},
 		},
-		Body: []byte(`{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"hi"}],"stream":true}`),
+		Body: []byte(`{"model":"deepseek-v4-flash-202605","messages":[{"role":"user","content":"hi"}],"stream":true}`),
 	}
 
 	outcome, err := gateway.forwardAPIKey(context.Background(), request, "")
@@ -262,7 +262,7 @@ func TestForwardAPIKeyDeepSeekChatStreamKeepsFinishChunkWhenSuppressingEmbeddedU
 	if !strings.Contains(clientBody, `"finish_reason":"stop"`) || !strings.Contains(clientBody, "data: [DONE]") {
 		t.Fatalf("client stream lost finish chunk: %s", clientBody)
 	}
-	assertDeepSeekChatUsageForModel(t, outcome.Usage, "deepseek-v4-flash")
+	assertDeepSeekChatUsageForModel(t, outcome.Usage, "deepseek-v4-flash-202605")
 }
 
 func TestForwardAPIKeyResponsesStreamDoesNotInjectChatStreamOptions(t *testing.T) {
@@ -274,7 +274,7 @@ func TestForwardAPIKeyResponsesStreamDoesNotInjectChatStreamOptions(t *testing.T
 		_, _ = io.WriteString(w, strings.Join([]string{
 			`data: {"type":"response.output_text.delta","delta":"ok"}`,
 			"",
-			`data: {"type":"response.completed","response":{"id":"resp_test","model":"deepseek-v4-flash","status":"completed","usage":{"input_tokens":5,"output_tokens":2},"output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}]}}`,
+			`data: {"type":"response.completed","response":{"id":"resp_test","model":"deepseek-v4-flash-202605","status":"completed","usage":{"input_tokens":5,"output_tokens":2},"output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}]}}`,
 			"",
 		}, "\n"))
 	}))
@@ -288,7 +288,7 @@ func TestForwardAPIKeyResponsesStreamDoesNotInjectChatStreamOptions(t *testing.T
 			"api_key":  "test-key",
 			"base_url": server.URL,
 		}},
-		Model:  "deepseek-v4-flash",
+		Model:  "deepseek-v4-flash-202605",
 		Stream: true,
 		Writer: writer,
 		Headers: http.Header{
@@ -296,7 +296,7 @@ func TestForwardAPIKeyResponsesStreamDoesNotInjectChatStreamOptions(t *testing.T
 			"X-Forwarded-Method": []string{http.MethodPost},
 			"X-Forwarded-Path":   []string{"/v1/responses"},
 		},
-		Body: []byte(`{"model":"deepseek-v4-flash","input":"hi","stream":true}`),
+		Body: []byte(`{"model":"deepseek-v4-flash-202605","input":"hi","stream":true}`),
 	}
 
 	outcome, err := gateway.forwardAPIKey(context.Background(), request, "")
@@ -321,7 +321,7 @@ func TestForwardAPIKeyResponsesStreamDoesNotInjectChatStreamOptions(t *testing.T
 }
 
 func assertDeepSeekChatUsage(t *testing.T, usage *sdk.Usage) {
-	assertDeepSeekChatUsageForModel(t, usage, "deepseek-v4-flash")
+	assertDeepSeekChatUsageForModel(t, usage, "deepseek-v4-flash-202605")
 }
 
 func assertDeepSeekChatUsageForModel(t *testing.T, usage *sdk.Usage, wantModel string) {
@@ -350,11 +350,11 @@ func assertDeepSeekChatUsageForModel(t *testing.T, usage *sdk.Usage, wantModel s
 }
 
 const chatStreamPrefix = "" +
-	`data: {"id":"chatcmpl_test","object":"chat.completion.chunk","model":"deepseek-v4-flash","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}` + "\n\n" +
-	`data: {"id":"chatcmpl_test","object":"chat.completion.chunk","model":"deepseek-v4-flash","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":null}]}` + "\n\n" +
-	`data: {"id":"chatcmpl_test","object":"chat.completion.chunk","model":"deepseek-v4-flash","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}` + "\n\n"
+	`data: {"id":"chatcmpl_test","object":"chat.completion.chunk","model":"deepseek-v4-flash-202605","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}` + "\n\n" +
+	`data: {"id":"chatcmpl_test","object":"chat.completion.chunk","model":"deepseek-v4-flash-202605","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":null}]}` + "\n\n" +
+	`data: {"id":"chatcmpl_test","object":"chat.completion.chunk","model":"deepseek-v4-flash-202605","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}` + "\n\n"
 
-const chatUsageChunk = `data: {"id":"chatcmpl_test","object":"chat.completion.chunk","model":"deepseek-v4-flash","choices":[],"usage":{"prompt_tokens":88,"completion_tokens":8,"total_tokens":96,"prompt_tokens_details":{"cached_tokens":13},"completion_tokens_details":{"reasoning_tokens":3}}}` + "\n\n"
+const chatUsageChunk = `data: {"id":"chatcmpl_test","object":"chat.completion.chunk","model":"deepseek-v4-flash-202605","choices":[],"usage":{"prompt_tokens":88,"completion_tokens":8,"total_tokens":96,"prompt_tokens_details":{"cached_tokens":13},"completion_tokens_details":{"reasoning_tokens":3}}}` + "\n\n"
 
 const chatStreamWithoutUsage = chatStreamPrefix + "data: [DONE]\n\n"
 const chatStreamWithUsage = chatStreamPrefix + chatUsageChunk + "data: [DONE]\n\n"
@@ -365,11 +365,11 @@ const nonDeepSeekChatStream = "" +
 	"data: [DONE]\n\n"
 
 const chatStreamWithEmbeddedUsage = "" +
-	`data: {"id":"chatcmpl_formal","object":"chat.completion.chunk","model":"deepseek-v4-flash","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":null}]}` + "\n\n" +
-	`data: {"id":"chatcmpl_formal","object":"chat.completion.chunk","model":"deepseek-v4-flash","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":88,"completion_tokens":8,"total_tokens":96,"prompt_tokens_details":{"cached_tokens":13},"completion_tokens_details":{"reasoning_tokens":3}}}` + "\n\n" +
+	`data: {"id":"chatcmpl_formal","object":"chat.completion.chunk","model":"deepseek-v4-flash-202605","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":null}]}` + "\n\n" +
+	`data: {"id":"chatcmpl_formal","object":"chat.completion.chunk","model":"deepseek-v4-flash-202605","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":88,"completion_tokens":8,"total_tokens":96,"prompt_tokens_details":{"cached_tokens":13},"completion_tokens_details":{"reasoning_tokens":3}}}` + "\n\n" +
 	"data: [DONE]\n\n"
 
 const chatStreamWithEmbeddedUsageSuppressed = "" +
-	`data: {"id":"chatcmpl_formal","object":"chat.completion.chunk","model":"deepseek-v4-flash","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":null}]}` + "\n\n" +
-	`data: {"id":"chatcmpl_formal","object":"chat.completion.chunk","model":"deepseek-v4-flash","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}` + "\n\n" +
+	`data: {"id":"chatcmpl_formal","object":"chat.completion.chunk","model":"deepseek-v4-flash-202605","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":null}]}` + "\n\n" +
+	`data: {"id":"chatcmpl_formal","object":"chat.completion.chunk","model":"deepseek-v4-flash-202605","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}` + "\n\n" +
 	"data: [DONE]\n\n"

@@ -136,9 +136,9 @@ func TestCatalogOverlay_AddNewModel(t *testing.T) {
 }
 
 func TestCatalogOverlay_RetiredDeepSeekAliasCannotBeRestored(t *testing.T) {
-	const retiredID = "deepseek-v4-flash-202605"
+	const retiredID = "deepseek-v4-flash"
 	withCatalogOverlay(t, `[
-	  {"id":"deepseek-v4-flash-202605","name":"Stale DeepSeek Alias",
+	  {"id":"deepseek-v4-flash","name":"Stale DeepSeek Alias",
 	   "pricing":{"input":99,"cached_input":99,"output":99}}
 	]`)
 
