@@ -1364,13 +1364,19 @@ func parseRetryDelay(msg string) time.Duration {
 	}
 	val, err := strconv.ParseFloat(matches[1], 64)
 	if err != nil {
+		// The pattern accepts only positive decimal literals, so ParseFloat
+		// errors here are range overflows. Preserve the upstream retry intent
+		// while keeping it within the gateway's hard ceiling.
+		return maxUpstreamRetryAfter
+	}
+	if val <= 0 {
 		return 0
 	}
 	unit := strings.ToLower(matches[2])
 	if unit == "ms" {
-		return time.Duration(val * float64(time.Millisecond))
+		return cappedUpstreamRetryAfterFloat(val, time.Millisecond)
 	}
-	return time.Duration(val * float64(time.Second))
+	return cappedUpstreamRetryAfterFloat(val, time.Second)
 }
 
 func containsAny(values ...string) bool {

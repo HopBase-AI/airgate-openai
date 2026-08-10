@@ -207,6 +207,26 @@ func TestWebSocketHandshake429StructuredOverloadIsTransient(t *testing.T) {
 	}
 }
 
+func TestWebSocketHandshake429IncompletePrimaryUsesOverloadFallback(t *testing.T) {
+	body := []byte(`{"error":{}}`)
+	outcome := webSocketHandshakeFailureOutcome(&http.Response{
+		StatusCode: http.StatusTooManyRequests,
+		Header:     http.Header{},
+	}, &webSocketDialError{
+		message:      productionOverloadMessage,
+		responseBody: body,
+	})
+	if outcome.Kind != sdk.OutcomeUpstreamTransient {
+		t.Fatalf("Kind = %v, want UpstreamTransient", outcome.Kind)
+	}
+	if outcome.Kind.IsAccountFault() {
+		t.Fatalf("incomplete handshake error must not penalize account: %v", outcome.Kind)
+	}
+	if string(outcome.Upstream.Body) != string(body) {
+		t.Fatalf("upstream body = %s, want %s", outcome.Upstream.Body, body)
+	}
+}
+
 func TestFormatWebSocketDialErrorClosesResponseBody(t *testing.T) {
 	body := &trackingReadCloser{Reader: strings.NewReader(`{"error":{"code":"server_is_overloaded","message":"Please try again later."}}`)}
 	err := formatWebSocketDialError(&http.Response{
@@ -279,6 +299,7 @@ func TestExtractRetryAfterHeaderFormats(t *testing.T) {
 		{name: "integer seconds", value: "17", want: 17 * time.Second},
 		{name: "decimal seconds fallback", value: "1.5", want: 1500 * time.Millisecond},
 		{name: "textual fallback", value: "try again in 250ms", want: 250 * time.Millisecond},
+		{name: "huge integer is capped", value: "999999999999999999999999999999", want: maxUpstreamRetryAfter},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -293,6 +314,12 @@ func TestExtractRetryAfterHeaderFormats(t *testing.T) {
 	got := extractRetryAfterHeader(http.Header{"Retry-After": []string{retryAt}})
 	if got < 25*time.Second || got > 31*time.Second {
 		t.Fatalf("HTTP-date Retry-After = %v, want roughly 30s", got)
+	}
+}
+
+func TestParseRetryDelayCapsNumericOverflow(t *testing.T) {
+	if got := parseRetryDelay("servers are overloaded; try again in 999999999999999999999999999999s"); got != maxUpstreamRetryAfter {
+		t.Fatalf("parseRetryDelay overflow = %v, want cap %v", got, maxUpstreamRetryAfter)
 	}
 }
 
@@ -453,6 +480,56 @@ func TestWriteAnthropicUpstreamErrorUsesRetryAfterHeader(t *testing.T) {
 	}
 	if got := headers.Get("Content-Type"); got != "" {
 		t.Fatalf("input headers were mutated: Content-Type = %q", got)
+	}
+}
+
+func TestWriteAnthropicUpstreamErrorUsesBodyRateLimitReset(t *testing.T) {
+	body := []byte(`{"error":{"type":"usage_limit_reached","code":"rate_limit_exceeded","message":"The usage limit has been reached","resets_in_seconds":3600}}`)
+	outcome, err := (&OpenAIGateway{}).writeAnthropicUpstreamError(nil, http.StatusTooManyRequests, nil, body, time.Now())
+	if err == nil {
+		t.Fatal("error = nil, want retryable upstream error")
+	}
+	if outcome.Kind != sdk.OutcomeAccountRateLimited {
+		t.Fatalf("Kind = %v, want AccountRateLimited", outcome.Kind)
+	}
+	if outcome.RetryAfter != time.Hour {
+		t.Fatalf("RetryAfter = %v, want 1h from upstream body", outcome.RetryAfter)
+	}
+}
+
+func TestWriteAnthropicUpstreamErrorUsesStandardRateLimitResetHeader(t *testing.T) {
+	headers := http.Header{"X-RateLimit-Reset-Requests": []string{"2m"}}
+	body := []byte(`{"error":{"type":"rate_limit_error","code":"rate_limit_exceeded","message":"Rate limit reached"}}`)
+	outcome, err := (&OpenAIGateway{}).writeAnthropicUpstreamError(nil, http.StatusTooManyRequests, headers, body, time.Now())
+	if err == nil {
+		t.Fatal("error = nil, want retryable upstream error")
+	}
+	if outcome.Kind != sdk.OutcomeAccountRateLimited {
+		t.Fatalf("Kind = %v, want AccountRateLimited", outcome.Kind)
+	}
+	if outcome.RetryAfter != 2*time.Minute {
+		t.Fatalf("RetryAfter = %v, want 2m from upstream reset header", outcome.RetryAfter)
+	}
+}
+
+func TestWriteAnthropicUpstreamErrorNestedResponseErrorWinsOverRelayWrapper(t *testing.T) {
+	body := []byte(`{
+		"type":"response.failed",
+		"error":{"type":"rate_limit_error","code":"rate_limit_exceeded","message":"relay says try again in 999999999999999999999s","resets_in_seconds":604800},
+		"response":{"error":{"type":"server_error","code":"server_is_overloaded","message":"OpenAI capacity is temporarily unavailable"}}
+	}`)
+	outcome, err := (&OpenAIGateway{}).writeAnthropicUpstreamError(nil, http.StatusTooManyRequests, nil, body, time.Now())
+	if err == nil {
+		t.Fatal("error = nil, want retryable upstream error")
+	}
+	if outcome.Kind != sdk.OutcomeUpstreamTransient {
+		t.Fatalf("Kind = %v, want UpstreamTransient from response.error", outcome.Kind)
+	}
+	if outcome.RetryAfter != 0 {
+		t.Fatalf("RetryAfter = %v, want zero; relay retry text must not alter transient TTL", outcome.RetryAfter)
+	}
+	if outcome.Reason != "OpenAI capacity is temporarily unavailable" {
+		t.Fatalf("Reason = %q, want canonical response error message", outcome.Reason)
 	}
 }
 

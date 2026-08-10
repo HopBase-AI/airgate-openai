@@ -58,9 +58,19 @@ func successOutcome(statusCode int, body []byte, headers http.Header, usage *sdk
 func failureOutcome(statusCode int, body []byte, headers http.Header, message string, retryAfter time.Duration) sdk.ForwardOutcome {
 	classificationText := failureClassificationText(body, message)
 	kind := classifyHTTPFailureBody(statusCode, body, message)
+	if retryAfter <= 0 {
+		retryAfter = extractRetryAfterHeader(headers)
+	}
+	if retryAfter <= 0 && kind == sdk.OutcomeAccountRateLimited {
+		retryAfter = openAIRateLimitReset(body)
+	}
+	if retryAfter <= 0 && kind == sdk.OutcomeAccountRateLimited {
+		retryAfter = openAIRateLimitResetFromHeaders(headers)
+	}
 	if retryAfter <= 0 && (kind == sdk.OutcomeAccountRateLimited || kind == sdk.OutcomeUpstreamTransient) {
 		retryAfter = defaultRetryAfterForKind(kind, statusCode, classificationText)
 	}
+	retryAfter = cappedUpstreamRetryAfterDuration(retryAfter)
 	reason := message
 	if reason != "" {
 		reason = fmt.Sprintf("HTTP %d: %s", statusCode, message)
@@ -75,6 +85,17 @@ func failureOutcome(statusCode int, body []byte, headers http.Header, message st
 		Reason:     reason,
 		RetryAfter: retryAfter,
 	}
+}
+
+// openAIRateLimitReset extracts an explicit OAuth rate-limit reset from an
+// upstream JSON error body. A transport Retry-After header remains higher
+// priority; callers use this only when that header supplied no valid delay.
+//
+// The fields are meaningful only after the response has been classified as an
+// account-level rate limit, so overload and generic 5xx responses cannot open
+// a cooldown merely by carrying a similarly named field.
+func openAIRateLimitReset(body []byte) time.Duration {
+	return openAIRateLimitResetFromNodes(body)
 }
 
 func webSocketHandshakeFailureOutcome(resp *http.Response, err error) sdk.ForwardOutcome {

@@ -3,6 +3,7 @@ package gateway
 import (
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -184,20 +185,90 @@ func applyOpenAIRateLimitReset(failure *responsesFailureError, errNode gjson.Res
 	if failure == nil || failure.Kind != responsesFailureKindRateLimited {
 		return
 	}
-	if secs := errNode.Get("resets_in_seconds"); secs.Exists() {
-		if v := secs.Int(); v > 0 {
-			failure.RetryAfter = time.Duration(v) * time.Second
-			return
+	if retryAfter := openAIRateLimitResetFromNode(errNode); retryAfter > 0 {
+		failure.RetryAfter = retryAfter
+	}
+}
+
+func openAIRateLimitResetFromNodes(rawNodes ...[]byte) time.Duration {
+	nodes := make([]gjson.Result, 0, len(rawNodes))
+	for _, raw := range rawNodes {
+		nodes = append(nodes, primaryHTTPErrorNode(raw))
+	}
+	// An explicit relative reset is more precise than an absolute timestamp.
+	// Each body contributes only its authoritative error object, preventing a
+	// relay wrapper from supplying a cooldown for a conflicting nested failure.
+	for _, node := range nodes {
+		if retryAfter := openAIRateLimitResetInSeconds(node); retryAfter > 0 {
+			return retryAfter
 		}
 	}
-	if resetsAt := errNode.Get("resets_at"); resetsAt.Exists() {
-		if ts := resetsAt.Int(); ts > 0 {
-			until := time.Until(time.Unix(ts, 0))
-			if until > 0 {
-				failure.RetryAfter = until
-			}
+	for _, node := range nodes {
+		if retryAfter := openAIRateLimitResetAt(node); retryAfter > 0 {
+			return retryAfter
 		}
 	}
+	return 0
+}
+
+func openAIRateLimitResetFromNode(node gjson.Result) time.Duration {
+	if retryAfter := openAIRateLimitResetInSeconds(node); retryAfter > 0 {
+		return retryAfter
+	}
+	return openAIRateLimitResetAt(node)
+}
+
+func openAIRateLimitResetInSeconds(node gjson.Result) time.Duration {
+	if !node.Exists() {
+		return 0
+	}
+	if secs := node.Get("resets_in_seconds"); secs.Exists() {
+		raw := secs.Raw
+		if secs.Type == gjson.String {
+			raw = secs.Str
+		}
+		if retryAfter := parseUpstreamRetryAfterSeconds(raw); retryAfter > 0 {
+			return retryAfter
+		}
+	}
+	return 0
+}
+
+func openAIRateLimitResetAt(node gjson.Result) time.Duration {
+	if !node.Exists() {
+		return 0
+	}
+	if resetAt := node.Get("resets_at"); resetAt.Exists() {
+		raw := resetAt.Raw
+		if resetAt.Type == gjson.String {
+			raw = resetAt.Str
+		}
+		timestamp := parseUnixTimestampSeconds(raw)
+		if timestamp <= 0 || timestamp > maxUnixTimestampSeconds {
+			return 0
+		}
+		if now := time.Now(); timestamp > now.Unix() {
+			return cappedUpstreamRetryAfterDuration(time.Unix(timestamp, 0).Sub(now))
+		}
+	}
+	return 0
+}
+
+func parseUnixTimestampSeconds(raw string) int64 {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || raw[0] == '-' {
+		return 0
+	}
+	for _, ch := range raw {
+		if ch < '0' || ch > '9' {
+			return 0
+		}
+	}
+	timestamp, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || timestamp <= 0 {
+		return 0
+	}
+	return timestamp
 }
 
 // classifyResponsesError 根据 type/code/message 关键词归类错误。
