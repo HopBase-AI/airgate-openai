@@ -161,13 +161,13 @@ func waitGatewayTestWebSocket(t *testing.T, result <-chan error) {
 	}
 }
 
-func TestFailureOutcomeProductionOverloadUsesShortRetry(t *testing.T) {
+func TestFailureOutcomeProductionOverloadWithoutHintLeavesRetryUnset(t *testing.T) {
 	outcome := failureOutcome(http.StatusServiceUnavailable, nil, nil, productionOverloadMessage, 0)
 	if outcome.Kind != sdk.OutcomeUpstreamTransient {
 		t.Fatalf("Kind = %v, want UpstreamTransient", outcome.Kind)
 	}
-	if outcome.RetryAfter != 5*time.Second {
-		t.Fatalf("RetryAfter = %v, want 5s", outcome.RetryAfter)
+	if outcome.RetryAfter != 0 {
+		t.Fatalf("RetryAfter = %v, want zero without an upstream hint", outcome.RetryAfter)
 	}
 }
 
@@ -199,11 +199,31 @@ func TestWebSocketHandshake429StructuredOverloadIsTransient(t *testing.T) {
 	if outcome.Kind.IsAccountFault() {
 		t.Fatalf("handshake overload must not penalize the account: %v", outcome.Kind)
 	}
-	if outcome.RetryAfter != 5*time.Second {
-		t.Fatalf("RetryAfter = %v, want 5s", outcome.RetryAfter)
+	if outcome.RetryAfter != 0 {
+		t.Fatalf("RetryAfter = %v, want zero without an upstream hint", outcome.RetryAfter)
 	}
 	if !strings.Contains(string(outcome.Upstream.Body), `"code":"server_is_overloaded"`) {
 		t.Fatalf("preserved upstream error code missing; body=%s", outcome.Upstream.Body)
+	}
+}
+
+func TestWebSocketHandshake429IncompletePrimaryUsesOverloadFallback(t *testing.T) {
+	body := []byte(`{"error":{}}`)
+	outcome := webSocketHandshakeFailureOutcome(&http.Response{
+		StatusCode: http.StatusTooManyRequests,
+		Header:     http.Header{},
+	}, &webSocketDialError{
+		message:      productionOverloadMessage,
+		responseBody: body,
+	})
+	if outcome.Kind != sdk.OutcomeUpstreamTransient {
+		t.Fatalf("Kind = %v, want UpstreamTransient", outcome.Kind)
+	}
+	if outcome.Kind.IsAccountFault() {
+		t.Fatalf("incomplete handshake error must not penalize account: %v", outcome.Kind)
+	}
+	if string(outcome.Upstream.Body) != string(body) {
+		t.Fatalf("upstream body = %s, want %s", outcome.Upstream.Body, body)
 	}
 }
 
@@ -242,13 +262,13 @@ func TestFormatWebSocketDialErrorClosesResponseBodyAfterReadFailure(t *testing.T
 	}
 }
 
-func TestFailureOutcome529UsesShortRetry(t *testing.T) {
+func TestFailureOutcome529WithoutHintLeavesRetryUnset(t *testing.T) {
 	outcome := failureOutcome(529, nil, nil, "Please try again later.", 0)
 	if outcome.Kind != sdk.OutcomeUpstreamTransient {
 		t.Fatalf("Kind = %v, want UpstreamTransient", outcome.Kind)
 	}
-	if outcome.RetryAfter != 5*time.Second {
-		t.Fatalf("RetryAfter = %v, want 5s", outcome.RetryAfter)
+	if outcome.RetryAfter != 0 {
+		t.Fatalf("RetryAfter = %v, want zero without an upstream hint", outcome.RetryAfter)
 	}
 }
 
@@ -279,6 +299,7 @@ func TestExtractRetryAfterHeaderFormats(t *testing.T) {
 		{name: "integer seconds", value: "17", want: 17 * time.Second},
 		{name: "decimal seconds fallback", value: "1.5", want: 1500 * time.Millisecond},
 		{name: "textual fallback", value: "try again in 250ms", want: 250 * time.Millisecond},
+		{name: "huge integer is capped", value: "999999999999999999999999999999", want: maxUpstreamRetryAfter},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -293,6 +314,12 @@ func TestExtractRetryAfterHeaderFormats(t *testing.T) {
 	got := extractRetryAfterHeader(http.Header{"Retry-After": []string{retryAt}})
 	if got < 25*time.Second || got > 31*time.Second {
 		t.Fatalf("HTTP-date Retry-After = %v, want roughly 30s", got)
+	}
+}
+
+func TestParseRetryDelayCapsNumericOverflow(t *testing.T) {
+	if got := parseRetryDelay("servers are overloaded; try again in 999999999999999999999999999999s"); got != maxUpstreamRetryAfter {
+		t.Fatalf("parseRetryDelay overflow = %v, want cap %v", got, maxUpstreamRetryAfter)
 	}
 }
 
@@ -319,11 +346,39 @@ func TestHandleStreamResponsePostOutputOverloadRemainsTransient(t *testing.T) {
 	if outcome.Kind != sdk.OutcomeUpstreamTransient {
 		t.Fatalf("Kind = %v, want UpstreamTransient", outcome.Kind)
 	}
-	if outcome.RetryAfter != 5*time.Second {
-		t.Fatalf("RetryAfter = %v, want 5s", outcome.RetryAfter)
+	if outcome.RetryAfter != 0 {
+		t.Fatalf("RetryAfter = %v, want zero without an upstream hint", outcome.RetryAfter)
 	}
 	if !strings.Contains(w.Body.String(), "visible output") {
 		t.Fatalf("business output was not forwarded: %q", w.Body.String())
+	}
+}
+
+func TestHandleStreamResponsePostOutputGenericServerFailureIsStreamAborted(t *testing.T) {
+	body := strings.Join([]string{
+		`data: {"type":"response.created","response":{"id":"resp_1","model":"gpt-5.6-sol"}}`,
+		"",
+		`data: {"type":"response.output_text.delta","delta":"visible output"}`,
+		"",
+		`data: {"type":"response.failed","response":{"error":{"type":"server_error","code":"upstream_error","message":"Upstream request failed"}}}`,
+		"",
+	}, "\n")
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       io.NopCloser(strings.NewReader(body)),
+	}
+	w := httptest.NewRecorder()
+
+	outcome, err := handleStreamResponse(resp, w, time.Now(), "")
+	if err != nil {
+		t.Fatalf("handleStreamResponse error: %v", err)
+	}
+	if outcome.Kind != sdk.OutcomeStreamAborted {
+		t.Fatalf("Kind = %v, want StreamAborted for generic post-output server failure", outcome.Kind)
+	}
+	if outcome.RetryAfter != 0 {
+		t.Fatalf("RetryAfter = %v, want zero", outcome.RetryAfter)
 	}
 }
 
@@ -347,8 +402,8 @@ func TestHandleStreamResponsePostOutputFailurePreservesResponsesUsage(t *testing
 	if err != nil {
 		t.Fatalf("handleStreamResponse error: %v", err)
 	}
-	if outcome.Kind != sdk.OutcomeUpstreamTransient || outcome.RetryAfter != 5*time.Second {
-		t.Fatalf("outcome = kind:%v retry:%v, want UpstreamTransient/5s", outcome.Kind, outcome.RetryAfter)
+	if outcome.Kind != sdk.OutcomeUpstreamTransient || outcome.RetryAfter != 0 {
+		t.Fatalf("outcome = kind:%v retry:%v, want UpstreamTransient with no upstream retry hint", outcome.Kind, outcome.RetryAfter)
 	}
 	if outcome.Usage == nil {
 		t.Fatal("Usage = nil, want response.failed.response.usage")
@@ -428,7 +483,57 @@ func TestWriteAnthropicUpstreamErrorUsesRetryAfterHeader(t *testing.T) {
 	}
 }
 
-func TestWriteAnthropicUpstream429OverloadUsesTransientRetry(t *testing.T) {
+func TestWriteAnthropicUpstreamErrorUsesBodyRateLimitReset(t *testing.T) {
+	body := []byte(`{"error":{"type":"usage_limit_reached","code":"rate_limit_exceeded","message":"The usage limit has been reached","resets_in_seconds":3600}}`)
+	outcome, err := (&OpenAIGateway{}).writeAnthropicUpstreamError(nil, http.StatusTooManyRequests, nil, body, time.Now())
+	if err == nil {
+		t.Fatal("error = nil, want retryable upstream error")
+	}
+	if outcome.Kind != sdk.OutcomeAccountRateLimited {
+		t.Fatalf("Kind = %v, want AccountRateLimited", outcome.Kind)
+	}
+	if outcome.RetryAfter != time.Hour {
+		t.Fatalf("RetryAfter = %v, want 1h from upstream body", outcome.RetryAfter)
+	}
+}
+
+func TestWriteAnthropicUpstreamErrorUsesStandardRateLimitResetHeader(t *testing.T) {
+	headers := http.Header{"X-RateLimit-Reset-Requests": []string{"2m"}}
+	body := []byte(`{"error":{"type":"rate_limit_error","code":"rate_limit_exceeded","message":"Rate limit reached"}}`)
+	outcome, err := (&OpenAIGateway{}).writeAnthropicUpstreamError(nil, http.StatusTooManyRequests, headers, body, time.Now())
+	if err == nil {
+		t.Fatal("error = nil, want retryable upstream error")
+	}
+	if outcome.Kind != sdk.OutcomeAccountRateLimited {
+		t.Fatalf("Kind = %v, want AccountRateLimited", outcome.Kind)
+	}
+	if outcome.RetryAfter != 2*time.Minute {
+		t.Fatalf("RetryAfter = %v, want 2m from upstream reset header", outcome.RetryAfter)
+	}
+}
+
+func TestWriteAnthropicUpstreamErrorNestedResponseErrorWinsOverRelayWrapper(t *testing.T) {
+	body := []byte(`{
+		"type":"response.failed",
+		"error":{"type":"rate_limit_error","code":"rate_limit_exceeded","message":"relay says try again in 999999999999999999999s","resets_in_seconds":604800},
+		"response":{"error":{"type":"server_error","code":"server_is_overloaded","message":"OpenAI capacity is temporarily unavailable"}}
+	}`)
+	outcome, err := (&OpenAIGateway{}).writeAnthropicUpstreamError(nil, http.StatusTooManyRequests, nil, body, time.Now())
+	if err == nil {
+		t.Fatal("error = nil, want retryable upstream error")
+	}
+	if outcome.Kind != sdk.OutcomeUpstreamTransient {
+		t.Fatalf("Kind = %v, want UpstreamTransient from response.error", outcome.Kind)
+	}
+	if outcome.RetryAfter != 0 {
+		t.Fatalf("RetryAfter = %v, want zero; relay retry text must not alter transient TTL", outcome.RetryAfter)
+	}
+	if outcome.Reason != "OpenAI capacity is temporarily unavailable" {
+		t.Fatalf("Reason = %q, want canonical response error message", outcome.Reason)
+	}
+}
+
+func TestWriteAnthropicUpstream429OverloadWithoutHintLeavesRetryUnset(t *testing.T) {
 	body := []byte(`{"error":{"type":"server_error","code":"server_is_overloaded","message":"Please try again later."}}`)
 	outcome, err := (&OpenAIGateway{}).writeAnthropicUpstreamError(nil, http.StatusTooManyRequests, nil, body, time.Now())
 	if err == nil {
@@ -437,8 +542,8 @@ func TestWriteAnthropicUpstream429OverloadUsesTransientRetry(t *testing.T) {
 	if outcome.Kind != sdk.OutcomeUpstreamTransient {
 		t.Fatalf("Kind = %v, want UpstreamTransient", outcome.Kind)
 	}
-	if outcome.RetryAfter != 5*time.Second {
-		t.Fatalf("RetryAfter = %v, want 5s", outcome.RetryAfter)
+	if outcome.RetryAfter != 0 {
+		t.Fatalf("RetryAfter = %v, want zero without an upstream hint", outcome.RetryAfter)
 	}
 }
 
@@ -462,8 +567,8 @@ func TestOAuthWSPreludeOverloadDoesNotCommitClientResponse(t *testing.T) {
 		if failure.kind != sdk.OutcomeUpstreamTransient {
 			t.Fatalf("Kind = %v, want UpstreamTransient", failure.kind)
 		}
-		if failure.retryAfter != 5*time.Second {
-			t.Fatalf("RetryAfter = %v, want 5s", failure.retryAfter)
+		if failure.retryAfter != 0 {
+			t.Fatalf("RetryAfter = %v, want zero without an upstream hint", failure.retryAfter)
 		}
 		if err := forwardErrorForOAuthWSFailure(result.Err, handler.wrote, failure.kind, nil); err == nil {
 			t.Fatal("pre-output overload lost Core-facing error needed for failover")
@@ -483,8 +588,8 @@ func TestOAuthWSPreludeOverloadDoesNotCommitClientResponse(t *testing.T) {
 			t.Fatalf("pre-output failure committed chat stream: wrote=%v body=%q", handler.wrote, w.Body.String())
 		}
 		failure := classifyOAuthWSFailure(result.Err, handler.wrote)
-		if failure.kind != sdk.OutcomeUpstreamTransient || failure.retryAfter != 5*time.Second {
-			t.Fatalf("failure = %+v, want UpstreamTransient with 5s retry", failure)
+		if failure.kind != sdk.OutcomeUpstreamTransient || failure.retryAfter != 0 {
+			t.Fatalf("failure = %+v, want UpstreamTransient with no upstream retry hint", failure)
 		}
 	})
 }
@@ -551,8 +656,8 @@ func TestOAuthWSPostOutputOverloadRemainsTransient(t *testing.T) {
 	if failure.kind != sdk.OutcomeUpstreamTransient {
 		t.Fatalf("Kind = %v, want UpstreamTransient", failure.kind)
 	}
-	if failure.retryAfter != 5*time.Second {
-		t.Fatalf("RetryAfter = %v, want 5s", failure.retryAfter)
+	if failure.retryAfter != 0 {
+		t.Fatalf("RetryAfter = %v, want zero without an upstream hint", failure.retryAfter)
 	}
 	if result.InputTokens != 12 || result.OutputTokens != 3 {
 		t.Fatalf("usage = input:%d output:%d, want 12/3", result.InputTokens, result.OutputTokens)

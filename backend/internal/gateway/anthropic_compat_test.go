@@ -262,10 +262,9 @@ func TestTranslateResponsesSSEPostOutputFailurePreservesOutcomeAndUsage(t *testi
 		retryAfter time.Duration
 	}{
 		{
-			name:       "overload",
-			errorJSON:  `{"type":"service_unavailable_error","code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later."}`,
-			wantKind:   sdk.OutcomeUpstreamTransient,
-			retryAfter: 5 * time.Second,
+			name:      "overload",
+			errorJSON: `{"type":"service_unavailable_error","code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later."}`,
+			wantKind:  sdk.OutcomeUpstreamTransient,
 		},
 		{
 			name:       "rate limit reset",
@@ -382,8 +381,8 @@ func TestTranslateResponsesSSEPreOutputOverloadDoesNotCommit(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Core-facing error = %v, want nil classified outcome", err)
 			}
-			if outcome.Kind != sdk.OutcomeUpstreamTransient || outcome.RetryAfter != 5*time.Second {
-				t.Fatalf("outcome = kind:%v retry:%v, want UpstreamTransient/5s", outcome.Kind, outcome.RetryAfter)
+			if outcome.Kind != sdk.OutcomeUpstreamTransient || outcome.RetryAfter != 0 {
+				t.Fatalf("outcome = kind:%v retry:%v, want UpstreamTransient with no upstream retry hint", outcome.Kind, outcome.RetryAfter)
 			}
 			if body := w.BodyString(); body != "" {
 				t.Fatalf("pre-output failure committed Anthropic events: %q", body)

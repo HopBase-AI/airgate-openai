@@ -254,10 +254,10 @@ func handleStreamResponseWithKeepAliveOptions(logger *slog.Logger, resp *http.Re
 		var failure *responsesFailureError
 		if errors.As(streamErr, &failure) {
 			kind := failure.outcomeKind()
-			// Preserve an explicit overload as an account-neutral transient with a
-			// short retry hint. Core already knows the response writer is committed
-			// and will not replay this request against another account.
-			postOutputOverload := kind == sdk.OutcomeUpstreamTransient && failure.RetryAfter > 0
+			// Preserve an explicit overload as an account-neutral transient. Core
+			// independently knows the response writer is committed and will not replay
+			// this request; RetryAfter only carries an actual upstream delay.
+			postOutputOverload := kind == sdk.OutcomeUpstreamTransient && failure.isOverload()
 			if streamStarted && !postOutputOverload && kind != sdk.OutcomeClientError && kind != sdk.OutcomeAccountRateLimited && kind != sdk.OutcomeAccountDead {
 				kind = sdk.OutcomeStreamAborted
 			}
@@ -1364,13 +1364,19 @@ func parseRetryDelay(msg string) time.Duration {
 	}
 	val, err := strconv.ParseFloat(matches[1], 64)
 	if err != nil {
+		// The pattern accepts only positive decimal literals, so ParseFloat
+		// errors here are range overflows. Preserve the upstream retry intent
+		// while keeping it within the gateway's hard ceiling.
+		return maxUpstreamRetryAfter
+	}
+	if val <= 0 {
 		return 0
 	}
 	unit := strings.ToLower(matches[2])
 	if unit == "ms" {
-		return time.Duration(val * float64(time.Millisecond))
+		return cappedUpstreamRetryAfterFloat(val, time.Millisecond)
 	}
-	return time.Duration(val * float64(time.Second))
+	return cappedUpstreamRetryAfterFloat(val, time.Second)
 }
 
 func containsAny(values ...string) bool {

@@ -270,7 +270,9 @@ func TestHandleImagesResponse_TokenAttribution(t *testing.T) {
 
 func TestWriteSSEPingUsesCoreRecognizedComment(t *testing.T) {
 	w := httptest.NewRecorder()
-	writeSSEPing(w)
+	if err := writeSSEPing(w); err != nil {
+		t.Fatalf("writeSSEPing: %v", err)
+	}
 
 	if got, want := w.Body.String(), responseStreamKeepAliveComment; got != want {
 		t.Fatalf("body = %q, want %q", got, want)
@@ -2742,8 +2744,8 @@ func TestForwardImagesViaResponsesTool_KeepAliveThenOverloadStillFailsOver(t *te
 	if outcome.Upstream.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("StatusCode = %d, want 503", outcome.Upstream.StatusCode)
 	}
-	if outcome.RetryAfter != 5*time.Second {
-		t.Fatalf("RetryAfter = %v, want 5s", outcome.RetryAfter)
+	if outcome.RetryAfter != 0 {
+		t.Fatalf("RetryAfter = %v, want zero without an upstream hint", outcome.RetryAfter)
 	}
 	if serverFailure := <-serverErr; serverFailure != nil {
 		t.Fatal(serverFailure)

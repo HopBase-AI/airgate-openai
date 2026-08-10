@@ -12,6 +12,7 @@
 - **`plugin.yaml` 由 `make manifest` 生成，不可手改**（模型/路由/账号字段在 Go 代码里声明）。
 - 前端是单 `index.js` bundle，输出到 `web/dist/index.js`，用 `@doudou-start/airgate-theme`。
 - 协议转换是本仓核心职责：OpenAI ↔ Anthropic 字段映射改动要保证既有路由不回归，配套测试同包。
+- `UpstreamTransient` 的 `ForwardOutcome.RetryAfter` 只传递上游明确给出的 header 或正文延迟；无提示时必须为 `0`，本地 fallback 由 Core 统一拥有。
 
 ## 混合现状（过渡态）
 

@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -11,6 +12,114 @@ import (
 
 	sdk "github.com/DouDOU-start/airgate-sdk/sdkgo"
 )
+
+// maxUpstreamRetryAfter mirrors Core's rateLimitedMax. Keep the gateway-side
+// value bounded as well: ForwardOutcome.RetryAfter is also used to construct
+// the client-facing Retry-After headers before Core applies its own clamp.
+const maxUpstreamRetryAfter = 7 * 24 * time.Hour
+
+const maxUnixTimestampSeconds = int64(100_000_000_000)
+
+// positiveGoDurationSyntax separates a syntactically valid duration that
+// overflows time.Duration from malformed input. It intentionally accepts the
+// same positive component grammar as time.ParseDuration, including microseconds.
+var positiveGoDurationSyntax = regexp.MustCompile(`^\+?(?:(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:ns|us|\x{00B5}s|ms|s|m|h))+$`)
+
+func cappedUpstreamRetryAfter(seconds int64) time.Duration {
+	if seconds <= 0 {
+		return 0
+	}
+	maxSeconds := int64(maxUpstreamRetryAfter / time.Second)
+	if seconds >= maxSeconds {
+		return maxUpstreamRetryAfter
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+// parseUpstreamRetryAfterSeconds accepts only a positive integer number of
+// seconds. A positive integer outside int64 is treated as an over-limit value
+// and is safely capped instead of overflowing time.Duration.
+func parseUpstreamRetryAfterSeconds(raw string) time.Duration {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || raw[0] == '-' {
+		return 0
+	}
+	for _, ch := range raw {
+		if ch < '0' || ch > '9' {
+			return 0
+		}
+	}
+	seconds, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return maxUpstreamRetryAfter
+	}
+	return cappedUpstreamRetryAfter(seconds)
+}
+
+func cappedUpstreamRetryAfterDuration(delay time.Duration) time.Duration {
+	if delay <= 0 {
+		return 0
+	}
+	if delay > maxUpstreamRetryAfter {
+		return maxUpstreamRetryAfter
+	}
+	return delay
+}
+
+func cappedUpstreamRetryAfterFloat(value float64, unit time.Duration) time.Duration {
+	if value <= 0 || unit <= 0 {
+		return 0
+	}
+	if value >= float64(maxUpstreamRetryAfter)/float64(unit) {
+		return maxUpstreamRetryAfter
+	}
+	return time.Duration(value * float64(unit))
+}
+
+// openAIRateLimitResetFromHeaders reads the standard OpenAI rate-limit reset
+// windows. These headers carry duration strings such as "1m6s". When both
+// dimensions are present we keep the longer window: a 429 does not identify
+// which shared bucket was exhausted, so retrying before either reset risks
+// immediately repeating the failure.
+//
+// This helper intentionally has no say in classification. Callers use it only
+// after establishing an account-level rate limit, so an overloaded 429 cannot
+// turn a normal upstream outage into an account cooldown.
+func openAIRateLimitResetFromHeaders(headers http.Header) time.Duration {
+	var longest time.Duration
+	for _, name := range []string{
+		"X-RateLimit-Reset-Requests",
+		"X-RateLimit-Reset-Tokens",
+	} {
+		if delay := parseOpenAIRateLimitResetHeader(headerValue(headers, name)); delay > longest {
+			longest = delay
+		}
+	}
+	return longest
+}
+
+func parseOpenAIRateLimitResetHeader(raw string) time.Duration {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || raw[0] == '-' {
+		return 0
+	}
+	// Some compatible relays emit whole seconds instead of OpenAI's duration
+	// notation. Retain that harmless compatibility while keeping the same cap.
+	if delay := parseUpstreamRetryAfterSeconds(raw); delay > 0 {
+		return delay
+	}
+	delay, err := time.ParseDuration(raw)
+	if err != nil {
+		if positiveGoDurationSyntax.MatchString(raw) {
+			return maxUpstreamRetryAfter
+		}
+		return 0
+	}
+	if delay <= 0 {
+		return 0
+	}
+	return cappedUpstreamRetryAfterDuration(delay)
+}
 
 // 统一错误分类工具（跨 OpenAI / Anthropic 协议共用）。
 //
@@ -70,11 +179,25 @@ func classifyHTTPFailure(statusCode int, message string) sdk.OutcomeKind {
 
 // classifyAnthropicBody 从 Anthropic 错误响应体（400 可能是账号级）归一化 OutcomeKind。
 func classifyAnthropicBody(statusCode int, body []byte) sdk.OutcomeKind {
-	msg := gjson.GetBytes(body, "error.message").String()
+	msg := primaryHTTPErrorNode(body).Get("message").String()
 	if msg == "" {
 		msg = string(body)
 	}
 	return classifyHTTPFailureBody(statusCode, body, msg)
+}
+
+// primaryHTTPErrorNode selects the error object that describes the failed
+// response. A Responses envelope can contain a relay-level root error as well
+// as response.error; the nested response error is the upstream authority and
+// must control both classification and retry TTL extraction.
+func primaryHTTPErrorNode(body []byte) gjson.Result {
+	if responseError := gjson.GetBytes(body, "response.error"); responseError.IsObject() {
+		return responseError
+	}
+	if rootError := gjson.GetBytes(body, "error"); rootError.IsObject() {
+		return rootError
+	}
+	return gjson.Result{}
 }
 
 // classifyHTTPFailureBody gives machine-readable error.code/error.type
@@ -83,9 +206,18 @@ func classifyAnthropicBody(statusCode int, body []byte) sdk.OutcomeKind {
 // overloaded model in their human-readable message.
 func classifyHTTPFailureBody(statusCode int, body []byte, fallback string) sdk.OutcomeKind {
 	if statusCode != http.StatusGatewayTimeout {
-		for _, path := range []string{"error.code", "response.error.code", "code", "error.type", "response.error.type", "type"} {
-			if kind, ok := classifyStructuredHTTPFailure(statusCode, gjson.GetBytes(body, path).String()); ok {
-				return kind
+		node := primaryHTTPErrorNode(body)
+		if node.Exists() {
+			for _, field := range []string{"code", "type"} {
+				if kind, ok := classifyStructuredHTTPFailure(statusCode, node.Get(field).String()); ok {
+					return kind
+				}
+			}
+		} else {
+			for _, path := range []string{"code", "type"} {
+				if kind, ok := classifyStructuredHTTPFailure(statusCode, gjson.GetBytes(body, path).String()); ok {
+					return kind
+				}
 			}
 		}
 	}
@@ -128,18 +260,57 @@ func failureClassificationText(body []byte, fallback string) string {
 		parts = append(parts, value)
 	}
 
-	for _, path := range []string{
-		"error.type", "error.code", "error.message",
-		"response.error.type", "response.error.code", "response.error.message",
-		"type", "code", "message",
-	} {
-		appendPart(gjson.GetBytes(body, path).String())
+	node := primaryHTTPErrorNode(body)
+	if node.Exists() {
+		for _, field := range []string{"type", "code", "message"} {
+			appendPart(node.Get(field).String())
+		}
+		// A nested response.error is authoritative when it has a message or a
+		// recognized machine signal. Do not let relay wrapper prose alter that
+		// verdict or its Retry-After. Empty and undocumented error objects need
+		// the transport fallback, otherwise an overload 429 becomes a cooldown.
+		if !hasAuthoritativeFailureDetails(node) {
+			appendPart(fallback)
+			if strings.TrimSpace(fallback) == "" && len(body) > 0 {
+				appendPart(truncate(string(body), 500))
+			}
+		}
+	} else {
+		for _, path := range []string{"type", "code", "message"} {
+			appendPart(gjson.GetBytes(body, path).String())
+		}
+		if len(parts) == 0 && len(body) > 0 {
+			appendPart(truncate(string(body), 500))
+		}
+		appendPart(fallback)
 	}
-	if len(parts) == 0 && len(body) > 0 {
-		appendPart(truncate(string(body), 500))
-	}
-	appendPart(fallback)
 	return strings.Join(parts, " ")
+}
+
+// hasAuthoritativeFailureDetails reports whether an error object is complete
+// enough to take precedence over a relay or transport fallback. A non-empty
+// message is upstream evidence even if its code is undocumented; code/type-only
+// objects must carry a known signal before they can suppress that fallback.
+func hasAuthoritativeFailureDetails(node gjson.Result) bool {
+	if !node.Exists() {
+		return false
+	}
+	if strings.TrimSpace(node.Get("message").String()) != "" {
+		return true
+	}
+	for _, field := range []string{"code", "type"} {
+		signal := node.Get(field).String()
+		if isOverloadMachineSignal(signal) ||
+			isRateLimitMachineSignal(signal) ||
+			isClientRequestMachineSignal(signal) ||
+			isDefinitiveCredentialFailureText(signal) ||
+			isDisabledAccountText(signal) ||
+			isDefinitiveRateLimitText(signal) ||
+			isModelUnsupportedText(signal) {
+			return true
+		}
+	}
+	return false
 }
 
 func isDefinitiveRateLimitText(parts ...string) bool {
@@ -342,14 +513,11 @@ func extractRetryAfterHeader(headers http.Header) time.Duration {
 	if val == "" {
 		return 0
 	}
-	if seconds, err := strconv.ParseInt(val, 10, 64); err == nil {
-		if seconds <= 0 {
-			return 0
-		}
-		return time.Duration(seconds) * time.Second
+	if delay := parseUpstreamRetryAfterSeconds(val); delay > 0 {
+		return delay
 	}
 	if retryAt, err := http.ParseTime(val); err == nil {
-		if delay := time.Until(retryAt); delay > 0 {
+		if delay := cappedUpstreamRetryAfterDuration(time.Until(retryAt)); delay > 0 {
 			return delay
 		}
 		return 0

@@ -592,12 +592,19 @@ func (g *OpenAIGateway) writeAnthropicUpstreamError(
 
 	kind := classifyAnthropicBody(statusCode, body)
 	retryAfter := extractRetryAfterHeader(headers)
+	if retryAfter <= 0 && kind == sdk.OutcomeAccountRateLimited {
+		retryAfter = openAIRateLimitReset(body)
+	}
+	if retryAfter <= 0 && kind == sdk.OutcomeAccountRateLimited {
+		retryAfter = openAIRateLimitResetFromHeaders(headers)
+	}
 	if retryAfter <= 0 && statusCode == http.StatusTooManyRequests {
 		retryAfter = parseRetryDelay(errMsg)
 	}
 	if retryAfter <= 0 && (kind == sdk.OutcomeAccountRateLimited || kind == sdk.OutcomeUpstreamTransient) {
 		retryAfter = defaultRetryAfterForKind(kind, statusCode, failureClassificationText(body, errMsg))
 	}
+	retryAfter = cappedUpstreamRetryAfterDuration(retryAfter)
 
 	errBody := anthropicErrorJSON(anthropicErrorType(statusCode), errMsg)
 	upstreamHeaders := http.Header{"Content-Type": []string{"application/json"}}
@@ -621,7 +628,7 @@ func (g *OpenAIGateway) writeAnthropicUpstreamError(
 
 // extractOpenAIErrorMessage 从上游错误响应中提取错误消息（纯 gjson）
 func extractOpenAIErrorMessage(body []byte) string {
-	if msg := gjson.GetBytes(body, "error.message").String(); msg != "" {
+	if msg := primaryHTTPErrorNode(body).Get("message").String(); msg != "" {
 		return msg
 	}
 	return ""
