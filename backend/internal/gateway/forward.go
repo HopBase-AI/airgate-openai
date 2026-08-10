@@ -707,6 +707,7 @@ func classifyOAuthWSFailure(err error, streamOutputStarted bool) oauthWSFailureD
 		statusCode: http.StatusBadGateway,
 		message:    err.Error(),
 	}
+	postOutputOverload := false
 	var downstreamErr *downstreamWriteError
 	var failure *responsesFailureError
 	switch {
@@ -718,13 +719,13 @@ func classifyOAuthWSFailure(err error, streamOutputStarted bool) oauthWSFailureD
 		details.statusCode = failure.StatusCode
 		details.message = failure.Message
 		details.retryAfter = failure.RetryAfter
+		postOutputOverload = failure.isOverload()
 	}
 
 	// Once business output is visible, ordinary upstream failures are stream
 	// aborts and must never be replayed. Explicit overload remains an
-	// account-neutral transient with a short retry hint; Core independently
-	// prevents replay after the application response is committed.
-	postOutputOverload := details.kind == sdk.OutcomeUpstreamTransient && details.retryAfter > 0
+	// account-neutral transient; Core independently prevents replay after the
+	// application response is committed. RetryAfter only carries upstream hints.
 	if streamOutputStarted && !postOutputOverload && details.kind != sdk.OutcomeClientError && details.kind != sdk.OutcomeAccountRateLimited && details.kind != sdk.OutcomeAccountDead {
 		details.kind = sdk.OutcomeStreamAborted
 	}

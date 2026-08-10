@@ -101,15 +101,13 @@ func webSocketHandshakeFailureOutcome(resp *http.Response, err error) sdk.Forwar
 	)
 }
 
-func defaultRetryAfter(statusCode int, message string) time.Duration {
-	return defaultRetryAfterForKind(classifyHTTPFailure(statusCode, message), statusCode, message)
-}
-
 func defaultRetryAfterForKind(kind sdk.OutcomeKind, statusCode int, message string) time.Duration {
 	switch kind {
 	case sdk.OutcomeUpstreamTransient:
 		if statusCode == 529 || isOverloadedText(message) {
-			return 5 * time.Second
+			// Only propagate an explicit upstream delay. Core owns the fallback
+			// window when overload responses merely say "try again later".
+			return parseRetryDelay(message)
 		}
 	case sdk.OutcomeAccountRateLimited:
 		if statusCode == http.StatusTooManyRequests {

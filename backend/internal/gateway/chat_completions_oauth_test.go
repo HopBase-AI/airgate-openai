@@ -53,7 +53,9 @@ func TestChatCompletionsStreamWriter_TextOnly(t *testing.T) {
 	writer.OnRawEvent("response.output_text.delta", []byte(`{"type":"response.output_text.delta","delta":"你"}`))
 	writer.OnRawEvent("response.output_text.delta", []byte(`{"type":"response.output_text.delta","delta":"好"}`))
 	writer.OnRawEvent("response.completed", []byte(`{"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":5,"output_tokens":2}}}`))
-	writer.finalize()
+	if err := writer.finalize(); err != nil {
+		t.Fatalf("finalize stream: %v", err)
+	}
 
 	lines := extractSSEDataLines(w.buf.String())
 	if len(lines) == 0 {
@@ -121,7 +123,9 @@ func TestChatCompletionsStreamWriter_ToolCall(t *testing.T) {
 	writer.OnRawEvent("response.function_call_arguments.delta", []byte(`{"type":"response.function_call_arguments.delta","output_index":0,"delta":"{\"city\""}`))
 	writer.OnRawEvent("response.function_call_arguments.delta", []byte(`{"type":"response.function_call_arguments.delta","output_index":0,"delta":":\"北京\"}"}`))
 	writer.OnRawEvent("response.completed", []byte(`{"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":10,"output_tokens":6}}}`))
-	writer.finalize()
+	if err := writer.finalize(); err != nil {
+		t.Fatalf("finalize stream: %v", err)
+	}
 
 	lines := extractSSEDataLines(w.buf.String())
 	if lines[len(lines)-1] != "[DONE]" {
@@ -175,7 +179,9 @@ func TestChatCompletionsStreamWriter_ToolCallArgumentsDoneOnly(t *testing.T) {
 	writer.OnRawEvent("response.output_item.added", []byte(`{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","call_id":"call_1","name":"get_weather"}}`))
 	writer.OnRawEvent("response.function_call_arguments.done", []byte(`{"type":"response.function_call_arguments.done","output_index":0,"arguments":"{\"city\":\"北京\"}"}`))
 	writer.OnRawEvent("response.completed", []byte(`{"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":10,"output_tokens":6}}}`))
-	writer.finalize()
+	if err := writer.finalize(); err != nil {
+		t.Fatalf("finalize stream: %v", err)
+	}
 
 	lines := extractSSEDataLines(w.buf.String())
 	var argBuf strings.Builder

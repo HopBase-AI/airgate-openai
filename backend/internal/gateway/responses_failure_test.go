@@ -160,11 +160,10 @@ func TestFailureOutcomeStructured429Semantics(t *testing.T) {
 		wantRetryAfter time.Duration
 	}{
 		{
-			name:           "overload code is account neutral",
-			body:           `{"error":{"type":"server_error","code":"server_is_overloaded","message":"Please try again later."}}`,
-			message:        "Please try again later.",
-			wantKind:       sdk.OutcomeUpstreamTransient,
-			wantRetryAfter: 5 * time.Second,
+			name:     "overload code is account neutral",
+			body:     `{"error":{"type":"server_error","code":"server_is_overloaded","message":"Please try again later."}}`,
+			message:  "Please try again later.",
+			wantKind: sdk.OutcomeUpstreamTransient,
 		},
 		{
 			name:           "credential rate limit remains account scoped",
@@ -181,11 +180,10 @@ func TestFailureOutcomeStructured429Semantics(t *testing.T) {
 			wantRetryAfter: time.Minute,
 		},
 		{
-			name:           "overload code wins over generic rate type",
-			body:           `{"error":{"type":"rate_limit_error","code":"server_is_overloaded","message":"Please try again later."}}`,
-			message:        "Please try again later.",
-			wantKind:       sdk.OutcomeUpstreamTransient,
-			wantRetryAfter: 5 * time.Second,
+			name:     "overload code wins over generic rate type",
+			body:     `{"error":{"type":"rate_limit_error","code":"server_is_overloaded","message":"Please try again later."}}`,
+			message:  "Please try again later.",
+			wantKind: sdk.OutcomeUpstreamTransient,
 		},
 		{
 			name:           "rate limit code wins over invalid request type",
@@ -195,11 +193,10 @@ func TestFailureOutcomeStructured429Semantics(t *testing.T) {
 			wantRetryAfter: time.Minute,
 		},
 		{
-			name:           "top level overload type wins over rate prose",
-			body:           `{"type":"server_is_overloaded","message":"Rate limit exceeded."}`,
-			message:        "Rate limit exceeded.",
-			wantKind:       sdk.OutcomeUpstreamTransient,
-			wantRetryAfter: 5 * time.Second,
+			name:     "top level overload type wins over rate prose",
+			body:     `{"type":"server_is_overloaded","message":"Rate limit exceeded."}`,
+			message:  "Rate limit exceeded.",
+			wantKind: sdk.OutcomeUpstreamTransient,
 		},
 	}
 
@@ -301,6 +298,17 @@ func TestFailureOutcomeStructuredOverloadPreservesRetryAfter(t *testing.T) {
 	}
 }
 
+func TestFailureOutcomeStructuredOverloadUsesExplicitTextDelay(t *testing.T) {
+	body := []byte(`{"error":{"type":"server_error","code":"server_is_overloaded","message":"Servers are overloaded; try again in 1.5s."}}`)
+	outcome := failureOutcome(http.StatusServiceUnavailable, body, nil, "Servers are overloaded; try again in 1.5s.", 0)
+	if outcome.Kind != sdk.OutcomeUpstreamTransient {
+		t.Fatalf("Kind = %v, want UpstreamTransient", outcome.Kind)
+	}
+	if outcome.RetryAfter != 1500*time.Millisecond {
+		t.Fatalf("RetryAfter = %v, want 1.5s from upstream text", outcome.RetryAfter)
+	}
+}
+
 func TestForwardAPIKeyHTTP429StructuredOverloadIsTransient(t *testing.T) {
 	upstreamBody := `{"error":{"type":"server_error","code":"server_is_overloaded","message":"Please try again later."}}`
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -337,8 +345,8 @@ func TestForwardAPIKeyHTTP429StructuredOverloadIsTransient(t *testing.T) {
 	if outcome.Upstream.StatusCode != http.StatusTooManyRequests {
 		t.Fatalf("transport status = %d, want 429", outcome.Upstream.StatusCode)
 	}
-	if outcome.RetryAfter != 5*time.Second {
-		t.Fatalf("RetryAfter = %v, want 5s", outcome.RetryAfter)
+	if outcome.RetryAfter != 0 {
+		t.Fatalf("RetryAfter = %v, want zero without an upstream hint", outcome.RetryAfter)
 	}
 }
 
@@ -350,10 +358,9 @@ func TestClassifyResponsesFailureProductionSSEMatrix(t *testing.T) {
 		wantRetryAfter time.Duration
 	}{
 		{
-			name:           "server overloaded is account neutral transient",
-			raw:            `{"type":"response.failed","response":{"error":{"type":"service_unavailable_error","code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later."}}}`,
-			want:           sdk.OutcomeUpstreamTransient,
-			wantRetryAfter: 5 * time.Second,
+			name: "server overloaded is account neutral transient",
+			raw:  `{"type":"response.failed","response":{"error":{"type":"service_unavailable_error","code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later."}}}`,
+			want: sdk.OutcomeUpstreamTransient,
 		},
 		{
 			name: "rate limit code wins over overload prose",
@@ -361,10 +368,15 @@ func TestClassifyResponsesFailureProductionSSEMatrix(t *testing.T) {
 			want: sdk.OutcomeAccountRateLimited,
 		},
 		{
-			name:           "overload code wins over rate limit type and prose",
-			raw:            `{"type":"response.failed","response":{"error":{"type":"rate_limit_error","code":"server_is_overloaded","message":"Rate limit exceeded."}}}`,
+			name: "overload code wins over rate limit type and prose",
+			raw:  `{"type":"response.failed","response":{"error":{"type":"rate_limit_error","code":"server_is_overloaded","message":"Rate limit exceeded."}}}`,
+			want: sdk.OutcomeUpstreamTransient,
+		},
+		{
+			name:           "overload preserves explicit text delay",
+			raw:            `{"type":"response.failed","response":{"error":{"type":"service_unavailable_error","code":"server_is_overloaded","message":"Our servers are overloaded; try again in 1.5s."}}}`,
 			want:           sdk.OutcomeUpstreamTransient,
-			wantRetryAfter: 5 * time.Second,
+			wantRetryAfter: 1500 * time.Millisecond,
 		},
 		{
 			name: "rate limit code wins over invalid request type",
@@ -403,6 +415,21 @@ func TestClassifyResponsesFailureProductionSSEMatrix(t *testing.T) {
 				t.Fatalf("RetryAfter = %v, want %v", failure.RetryAfter, tt.wantRetryAfter)
 			}
 		})
+	}
+}
+
+func TestGenericServerFailureIsNotExplicitOverload(t *testing.T) {
+	t.Parallel()
+
+	failure := classifyResponsesFailure([]byte(`{"type":"response.failed","response":{"error":{"type":"server_error","code":"upstream_error","message":"Upstream request failed"}}}`))
+	if failure == nil || failure.outcomeKind() != sdk.OutcomeUpstreamTransient {
+		t.Fatalf("failure = %+v, want generic UpstreamTransient", failure)
+	}
+	if failure.AnthropicErrorType != "overloaded_error" {
+		t.Fatalf("AnthropicErrorType = %q, want mapped overloaded_error", failure.AnthropicErrorType)
+	}
+	if failure.isOverload() {
+		t.Fatal("generic server_error was mistaken for an explicit overload")
 	}
 }
 

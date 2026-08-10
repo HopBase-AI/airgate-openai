@@ -254,10 +254,10 @@ func handleStreamResponseWithKeepAliveOptions(logger *slog.Logger, resp *http.Re
 		var failure *responsesFailureError
 		if errors.As(streamErr, &failure) {
 			kind := failure.outcomeKind()
-			// Preserve an explicit overload as an account-neutral transient with a
-			// short retry hint. Core already knows the response writer is committed
-			// and will not replay this request against another account.
-			postOutputOverload := kind == sdk.OutcomeUpstreamTransient && failure.RetryAfter > 0
+			// Preserve an explicit overload as an account-neutral transient. Core
+			// independently knows the response writer is committed and will not replay
+			// this request; RetryAfter only carries an actual upstream delay.
+			postOutputOverload := kind == sdk.OutcomeUpstreamTransient && failure.isOverload()
 			if streamStarted && !postOutputOverload && kind != sdk.OutcomeClientError && kind != sdk.OutcomeAccountRateLimited && kind != sdk.OutcomeAccountDead {
 				kind = sdk.OutcomeStreamAborted
 			}

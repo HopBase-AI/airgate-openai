@@ -29,6 +29,7 @@ type responsesFailureError struct {
 	Code               string
 	Message            string
 	RetryAfter         time.Duration
+	overload           bool
 }
 
 // outcomeKind 把内部 responsesFailureKind 映射到 SDK 的 OutcomeKind。
@@ -79,6 +80,10 @@ func (e *responsesFailureError) shouldReturnClientError() bool {
 
 func (e *responsesFailureError) isContinuationAnchorError() bool {
 	return e != nil && e.Kind == responsesFailureKindContinuationAnchor
+}
+
+func (e *responsesFailureError) isOverload() bool {
+	return e != nil && e.overload
 }
 
 func classifyResponsesFailure(data []byte) *responsesFailureError {
@@ -282,7 +287,8 @@ func overloadedResponsesFailure(message string) *responsesFailureError {
 		StatusCode:         http.StatusServiceUnavailable,
 		AnthropicErrorType: "overloaded_error",
 		Message:            message,
-		RetryAfter:         5 * time.Second,
+		RetryAfter:         parseRetryDelay(message),
+		overload:           true,
 	}
 }
 

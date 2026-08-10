@@ -821,8 +821,9 @@ done:
 		if errors.As(streamErr, &failure) {
 			kind := failure.outcomeKind()
 			// 已提交的普通故障不能重放；明确 overload 仍保留账号中性的
-			// UpstreamTransient + 短 RetryAfter，Core 会根据已提交 writer 禁止重放。
-			postOutputOverload := kind == sdk.OutcomeUpstreamTransient && failure.RetryAfter > 0
+			// UpstreamTransient，Core 会根据已提交 writer 禁止重放。RetryAfter
+			// 只表达上游实际提示，不再兼任 overload 标记。
+			postOutputOverload := kind == sdk.OutcomeUpstreamTransient && failure.isOverload()
 			if streamCommitted && !postOutputOverload && kind != sdk.OutcomeClientError && kind != sdk.OutcomeAccountRateLimited && kind != sdk.OutcomeAccountDead {
 				kind = sdk.OutcomeStreamAborted
 			}

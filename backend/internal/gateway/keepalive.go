@@ -2,7 +2,6 @@ package gateway
 
 import (
 	"context"
-	"encoding/json"
 	"io"
 	"net/http"
 	"sync"
@@ -271,22 +270,6 @@ func writeSSEDone(w http.ResponseWriter) error {
 		f.Flush()
 	}
 	return nil
-}
-
-func writeSSEError(w http.ResponseWriter, message string) error {
-	if message != imageTooLargeSSEErrorMessage {
-		message = sanitizedImageSSEErrorMessage
-	}
-	errEvent, _ := json.Marshal(map[string]any{
-		"error": map[string]any{
-			"message": message,
-			"type":    "server_error",
-		},
-	})
-	if err := writeSSEData(w, errEvent); err != nil {
-		return err
-	}
-	return writeSSEDone(w)
 }
 
 func writeImagesRESTSSE(w http.ResponseWriter, body []byte) error {
