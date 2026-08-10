@@ -13,8 +13,7 @@ import (
 
 // wsDialResult 封装 DialWebSocket 的认证失败信息
 type wsDialResult struct {
-	statusCode   int
-	errorMessage string
+	outcome sdk.ForwardOutcome
 }
 
 // HandleWebSocket 处理入站 WebSocket 连接（实现 sdk.GatewayPlugin）
@@ -51,7 +50,7 @@ func (g *OpenAIGateway) HandleWebSocket(ctx context.Context, conn sdk.WebSocketC
 
 	// 认证 / 上游失败：按 HTTP 状态码归类
 	if dialInfo != nil {
-		outcome := failureOutcome(dialInfo.statusCode, nil, nil, dialInfo.errorMessage, 0)
+		outcome := dialInfo.outcome
 		outcome.Duration = elapsed
 		return outcome, forwardErrForOutcome(outcome, err)
 	}
@@ -75,7 +74,7 @@ func (g *OpenAIGateway) handleWSWithOAuth(ctx context.Context, clientConn sdk.We
 	if err != nil {
 		var info *wsDialResult
 		if wsResp != nil {
-			info = &wsDialResult{statusCode: wsResp.StatusCode, errorMessage: err.Error()}
+			info = &wsDialResult{outcome: webSocketHandshakeFailureOutcome(wsResp, err)}
 		}
 		return info, fmt.Errorf("连接上游 WebSocket 失败: %w", err)
 	}
@@ -98,7 +97,7 @@ func (g *OpenAIGateway) handleWSWithAPIKey(ctx context.Context, clientConn sdk.W
 	if err != nil {
 		var info *wsDialResult
 		if wsResp != nil {
-			info = &wsDialResult{statusCode: wsResp.StatusCode, errorMessage: err.Error()}
+			info = &wsDialResult{outcome: webSocketHandshakeFailureOutcome(wsResp, err)}
 		}
 		return info, fmt.Errorf("连接上游 WebSocket 失败: %w", err)
 	}

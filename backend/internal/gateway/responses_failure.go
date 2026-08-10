@@ -198,6 +198,23 @@ func applyOpenAIRateLimitReset(failure *responsesFailureError, errNode gjson.Res
 // classifyResponsesError 根据 type/code/message 关键词归类错误。
 // 是 classifyResponsesFailure / classifyWSErrorEvent 的共用实现。
 func classifyResponsesError(errType, errCode, msg string) *responsesFailureError {
+	// In-band Responses and WebSocket errors use the same machine-signal
+	// precedence as HTTP failures: code, then type, then human-readable prose.
+	// Check these before generic invalid-request branches so an inconsistent type
+	// cannot hide an explicit rate-limit or overload code.
+	if isOverloadMachineSignal(errCode) {
+		return overloadedResponsesFailure(msg)
+	}
+	if isRateLimitMachineSignal(errCode) {
+		return rateLimitedResponsesFailure(msg)
+	}
+	if isOverloadMachineSignal(errType) {
+		return overloadedResponsesFailure(msg)
+	}
+	if isRateLimitMachineSignal(errType) {
+		return rateLimitedResponsesFailure(msg)
+	}
+
 	switch {
 	case containsAny(errType, errCode, msg, "previous_response_not_found", "previous response", "response not found"):
 		return &responsesFailureError{
@@ -243,22 +260,12 @@ func classifyResponsesError(errType, errCode, msg string) *responsesFailureError
 			AnthropicErrorType: "invalid_request_error",
 			Message:            msg,
 		}
-	case isOverloadedText(strings.Join([]string{errType, errCode, msg}, " ")):
-		return &responsesFailureError{
-			Kind:               responsesFailureKindServer,
-			StatusCode:         http.StatusServiceUnavailable,
-			AnthropicErrorType: "overloaded_error",
-			Message:            msg,
-			RetryAfter:         5 * time.Second,
-		}
-	case isTemporaryRateLimitText(errType, errCode, msg) || containsAny(errType, errCode, msg, "usage_limit_reached", "rate_limit_exceeded"):
-		return &responsesFailureError{
-			Kind:               responsesFailureKindRateLimited,
-			StatusCode:         http.StatusTooManyRequests,
-			AnthropicErrorType: "rate_limit_error",
-			Message:            msg,
-			RetryAfter:         parseRetryDelay(msg),
-		}
+	case isDefinitiveRateLimitText(msg):
+		return rateLimitedResponsesFailure(msg)
+	case isOverloadedText(msg):
+		return overloadedResponsesFailure(msg)
+	case isTemporaryRateLimitText(msg):
+		return rateLimitedResponsesFailure(msg)
 	default:
 		return &responsesFailureError{
 			Kind:               responsesFailureKindServer,
@@ -266,6 +273,26 @@ func classifyResponsesError(errType, errCode, msg string) *responsesFailureError
 			AnthropicErrorType: mapResponsesErrorType(errType, errCode),
 			Message:            msg,
 		}
+	}
+}
+
+func overloadedResponsesFailure(message string) *responsesFailureError {
+	return &responsesFailureError{
+		Kind:               responsesFailureKindServer,
+		StatusCode:         http.StatusServiceUnavailable,
+		AnthropicErrorType: "overloaded_error",
+		Message:            message,
+		RetryAfter:         5 * time.Second,
+	}
+}
+
+func rateLimitedResponsesFailure(message string) *responsesFailureError {
+	return &responsesFailureError{
+		Kind:               responsesFailureKindRateLimited,
+		StatusCode:         http.StatusTooManyRequests,
+		AnthropicErrorType: "rate_limit_error",
+		Message:            message,
+		RetryAfter:         parseRetryDelay(message),
 	}
 }
 

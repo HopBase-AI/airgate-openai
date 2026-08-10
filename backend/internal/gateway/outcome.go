@@ -56,9 +56,10 @@ func successOutcome(statusCode int, body []byte, headers http.Header, usage *sdk
 // failureOutcome 从 HTTP 状态码 + 错误消息分类并构造非 Success 的 Outcome。
 // 会原样保留 Upstream（Body / Headers / StatusCode）供 Core 在 ClientError 路径下透传。
 func failureOutcome(statusCode int, body []byte, headers http.Header, message string, retryAfter time.Duration) sdk.ForwardOutcome {
-	kind := classifyHTTPFailure(statusCode, message)
+	classificationText := failureClassificationText(body, message)
+	kind := classifyHTTPFailureBody(statusCode, body, message)
 	if retryAfter <= 0 && (kind == sdk.OutcomeAccountRateLimited || kind == sdk.OutcomeUpstreamTransient) {
-		retryAfter = defaultRetryAfter(statusCode, message)
+		retryAfter = defaultRetryAfterForKind(kind, statusCode, classificationText)
 	}
 	reason := message
 	if reason != "" {
@@ -76,19 +77,47 @@ func failureOutcome(statusCode int, body []byte, headers http.Header, message st
 	}
 }
 
-func defaultRetryAfter(statusCode int, message string) time.Duration {
-	switch {
-	case statusCode == http.StatusTooManyRequests:
-		return time.Minute
-	case statusCode == 529:
-		return 5 * time.Second
-	case statusCode >= 500 && isOverloadedText(message):
-		return 5 * time.Second
-	case isTemporaryRateLimitText(message):
-		return 10 * time.Minute
-	default:
-		return 0
+func webSocketHandshakeFailureOutcome(resp *http.Response, err error) sdk.ForwardOutcome {
+	if resp == nil {
+		if err == nil {
+			return transientOutcome("WebSocket 握手失败")
+		}
+		return transientOutcome(err.Error())
 	}
+	message := "WebSocket 握手失败"
+	if err != nil {
+		message = err.Error()
+	}
+	body := webSocketDialFailureBody(err)
+	if len(body) == 0 {
+		body = openAIErrorJSON("", "", message)
+	}
+	return failureOutcome(
+		resp.StatusCode,
+		body,
+		resp.Header.Clone(),
+		message,
+		extractRetryAfterHeader(resp.Header),
+	)
+}
+
+func defaultRetryAfter(statusCode int, message string) time.Duration {
+	return defaultRetryAfterForKind(classifyHTTPFailure(statusCode, message), statusCode, message)
+}
+
+func defaultRetryAfterForKind(kind sdk.OutcomeKind, statusCode int, message string) time.Duration {
+	switch kind {
+	case sdk.OutcomeUpstreamTransient:
+		if statusCode == 529 || isOverloadedText(message) {
+			return 5 * time.Second
+		}
+	case sdk.OutcomeAccountRateLimited:
+		if statusCode == http.StatusTooManyRequests {
+			return time.Minute
+		}
+		return 10 * time.Minute
+	}
+	return 0
 }
 
 func isOverloadedText(s string) bool {

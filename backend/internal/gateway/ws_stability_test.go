@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -167,6 +168,77 @@ func TestFailureOutcomeProductionOverloadUsesShortRetry(t *testing.T) {
 	}
 	if outcome.RetryAfter != 5*time.Second {
 		t.Fatalf("RetryAfter = %v, want 5s", outcome.RetryAfter)
+	}
+}
+
+func TestWebSocketHandshake429StructuredOverloadIsTransient(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = io.WriteString(w, `{"error":{"type":"server_error","code":"server_is_overloaded","message":"Please try again later."}}`)
+	}))
+	defer server.Close()
+
+	targetURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	conn, resp, err := dialWebSocket(targetURL, "", nil)
+	if conn != nil {
+		_ = conn.Close()
+		t.Fatal("connection unexpectedly succeeded")
+	}
+	if err == nil {
+		t.Fatal("handshake error = nil")
+	}
+	if resp == nil {
+		t.Fatal("handshake response = nil")
+	}
+
+	outcome := webSocketHandshakeFailureOutcome(resp, err)
+	if outcome.Kind != sdk.OutcomeUpstreamTransient {
+		t.Fatalf("Kind = %v, want UpstreamTransient; err=%v", outcome.Kind, err)
+	}
+	if outcome.Kind.IsAccountFault() {
+		t.Fatalf("handshake overload must not penalize the account: %v", outcome.Kind)
+	}
+	if outcome.RetryAfter != 5*time.Second {
+		t.Fatalf("RetryAfter = %v, want 5s", outcome.RetryAfter)
+	}
+	if !strings.Contains(string(outcome.Upstream.Body), `"code":"server_is_overloaded"`) {
+		t.Fatalf("preserved upstream error code missing; body=%s", outcome.Upstream.Body)
+	}
+}
+
+func TestFormatWebSocketDialErrorClosesResponseBody(t *testing.T) {
+	body := &trackingReadCloser{Reader: strings.NewReader(`{"error":{"code":"server_is_overloaded","message":"Please try again later."}}`)}
+	err := formatWebSocketDialError(&http.Response{
+		StatusCode: http.StatusTooManyRequests,
+		Body:       body,
+	}, errors.New("bad handshake"))
+	if err == nil {
+		t.Fatal("formatWebSocketDialError() error = nil")
+	}
+	if !body.closed {
+		t.Fatal("handshake response body was not closed")
+	}
+	if !strings.Contains(err.Error(), "server_is_overloaded") {
+		t.Fatalf("structured overload code missing from error: %v", err)
+	}
+}
+
+func TestFormatWebSocketDialErrorClosesResponseBodyAfterReadFailure(t *testing.T) {
+	handshakeErr := errors.New("bad handshake")
+	body := &trackingReadCloser{Reader: iotest.ErrReader(errors.New("response body read failed"))}
+	err := formatWebSocketDialError(&http.Response{
+		StatusCode: http.StatusBadGateway,
+		Body:       body,
+	}, handshakeErr)
+	if !body.closed {
+		t.Fatal("handshake response body was not closed after read failure")
+	}
+	if !errors.Is(err, handshakeErr) {
+		t.Fatalf("handshake cause was not preserved: %v", err)
+	}
+	if got := webSocketDialFailureBody(err); len(got) != 0 {
+		t.Fatalf("partially read response body must not be preserved: %q", got)
 	}
 }
 
@@ -353,6 +425,20 @@ func TestWriteAnthropicUpstreamErrorUsesRetryAfterHeader(t *testing.T) {
 	}
 	if got := headers.Get("Content-Type"); got != "" {
 		t.Fatalf("input headers were mutated: Content-Type = %q", got)
+	}
+}
+
+func TestWriteAnthropicUpstream429OverloadUsesTransientRetry(t *testing.T) {
+	body := []byte(`{"error":{"type":"server_error","code":"server_is_overloaded","message":"Please try again later."}}`)
+	outcome, err := (&OpenAIGateway{}).writeAnthropicUpstreamError(nil, http.StatusTooManyRequests, nil, body, time.Now())
+	if err == nil {
+		t.Fatal("error = nil, want retryable upstream error")
+	}
+	if outcome.Kind != sdk.OutcomeUpstreamTransient {
+		t.Fatalf("Kind = %v, want UpstreamTransient", outcome.Kind)
+	}
+	if outcome.RetryAfter != 5*time.Second {
+		t.Fatalf("RetryAfter = %v, want 5s", outcome.RetryAfter)
 	}
 }
 
