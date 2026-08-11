@@ -118,6 +118,20 @@ func TestClassifyHTTPFailureTreatsDisabled400AsAccountDead(t *testing.T) {
 	}
 }
 
+// TestClassifyHTTPFailureBodyBillingNotActiveCode 结构化 billing_not_active 在非 429
+// 任意错误状态码下判 Dead；429 保留限流语义。
+func TestClassifyHTTPFailureBodyBillingNotActiveCode(t *testing.T) {
+	body := []byte(`{"error":{"code":"billing_not_active","message":"Billing is not active on this account"}}`)
+	for _, status := range []int{402, 403, 502} {
+		if got := classifyHTTPFailureBody(status, body, ""); got != sdk.OutcomeAccountDead {
+			t.Fatalf("status %d: expected AccountDead, got %v", status, got)
+		}
+	}
+	if got := classifyHTTPFailureBody(429, body, ""); got != sdk.OutcomeAccountRateLimited {
+		t.Fatalf("429: expected AccountRateLimited, got %v", got)
+	}
+}
+
 func TestClassifyHTTPFailureProductionErrorMatrix(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -133,6 +147,10 @@ func TestClassifyHTTPFailureProductionErrorMatrix(t *testing.T) {
 		{"502 relay failure", 502, "error code: 502", sdk.OutcomeUpstreamTransient},
 		{"503 temporary outage", 503, "Service temporarily unavailable", sdk.OutcomeUpstreamTransient},
 		{"503 explicit overload", 503, "server_is_overloaded", sdk.OutcomeUpstreamTransient},
+		{"502 billing inactive", 502, "Your account is not active, please check your billing details on our website.", sdk.OutcomeAccountDead},
+		{"503 billing inactive", 503, "Your account is not active, please check your billing details on our website.", sdk.OutcomeAccountDead},
+		{"403 billing inactive", 403, "Your account is not active, please check your billing details on our website.", sdk.OutcomeAccountDead},
+		{"429 billing wording keeps rate limit", 429, "Your account is not active, please check your billing details on our website.", sdk.OutcomeAccountRateLimited},
 		{"529 provider overload", 529, "overloaded", sdk.OutcomeUpstreamTransient},
 		{"504 timeout is not replayable", 504, "server_is_overloaded", sdk.OutcomeClientError},
 		{"400 invalid request", 400, "invalid request payload", sdk.OutcomeClientError},

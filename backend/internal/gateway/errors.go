@@ -24,6 +24,8 @@ import (
 //	401 / 403 → AccountDead（附加消息关键词检查"usage limit" / "rate limit" 等会降级为 RateLimited）
 //	400 + 消息含限流关键词 → AccountRateLimited（部分上游用 400 返回 usage_limit_reached）
 //	400 + 消息含 disabled/deactivated → AccountDead
+//	非 429 的 4xx/5xx + 计费失效文案（account is not active / check your billing）→ AccountDead
+//	  （中转常把欠费包在 5xx 里，判 Transient 会反复降级-恢复来回抖）
 //	504 → ClientError（SDK 暂无账号中性的不可重放 5xx，借此保留原始 504）
 //	529 / 明确 overload 的 5xx → UpstreamTransient（短暂上游容量故障，不处罚账号）
 //	其它 5xx → UpstreamTransient
@@ -43,6 +45,13 @@ func classifyHTTPFailure(statusCode int, message string) sdk.OutcomeKind {
 	}
 	if isOverloadedText(message) && (statusCode == http.StatusTooManyRequests || statusCode >= 500) {
 		return sdk.OutcomeUpstreamTransient
+	}
+	// 计费失效（欠费/账号未激活）必须先于"try again later"类安抚文案判定：它不会在短
+	// 冷却内自愈，且中转常包在 5xx 里返回——按 5xx 判 Transient 会让池账号反复
+	// 降级-恢复来回抖一整天（2026-08-08 事故）。判 Dead：普通账号禁用待人工，
+	// 池账号走连击软降级。429 除外，保留限流语义。
+	if isBillingInactiveText(message) && statusCode >= 400 && statusCode != http.StatusTooManyRequests {
+		return sdk.OutcomeAccountDead
 	}
 	if isTemporaryRateLimitText(message) && (statusCode == 400 || statusCode == 403 || statusCode == 429) {
 		return sdk.OutcomeAccountRateLimited
@@ -100,6 +109,9 @@ func classifyStructuredHTTPFailure(statusCode int, signal string) (sdk.OutcomeKi
 	if isOverloadMachineSignal(signal) && (statusCode == http.StatusTooManyRequests || statusCode >= 500) {
 		return sdk.OutcomeUpstreamTransient, true
 	}
+	if isBillingDeadMachineSignal(signal) && statusCode >= 400 && statusCode != http.StatusTooManyRequests {
+		return sdk.OutcomeAccountDead, true
+	}
 	if isRateLimitMachineSignal(signal) && (statusCode == 400 || statusCode == 403 || statusCode == 429) {
 		return sdk.OutcomeAccountRateLimited, true
 	}
@@ -142,6 +154,30 @@ func failureClassificationText(body []byte, fallback string) string {
 	return strings.Join(parts, " ")
 }
 
+// isBillingInactiveText 上游把"账号未激活/欠费"类计费失效包在任意状态码（常见 5xx 包装）
+// 里返回的文案。真实样本：ndplaygames/bigsnake 中转 502 "Your account is not active,
+// please check your billing details on our website."（2026-08-08）。
+func isBillingInactiveText(parts ...string) bool {
+	combined := strings.ToLower(strings.Join(parts, " "))
+	if combined == "" {
+		return false
+	}
+	return strings.Contains(combined, "account is not active") ||
+		strings.Contains(combined, "check your billing") ||
+		strings.Contains(combined, "billing_not_active") ||
+		strings.Contains(combined, "account_not_active")
+}
+
+// isBillingDeadMachineSignal 结构化 error.code/type 明确表示账号计费失效。
+// 与限流信号分开：限流会自愈，计费失效需要人工充值/激活。
+func isBillingDeadMachineSignal(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "billing_not_active", "account_not_active", "billing_inactive":
+		return true
+	}
+	return false
+}
+
 func isDefinitiveRateLimitText(parts ...string) bool {
 	combined := strings.ToLower(strings.Join(parts, " "))
 	if combined == "" {
@@ -167,7 +203,7 @@ func isOverloadMachineSignal(value string) bool {
 
 func isRateLimitMachineSignal(value string) bool {
 	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "rate_limit_error", "rate_limit_exceeded", "usage_limit_reached", "too_many_requests", "insufficient_quota", "quota_exceeded", "billing_hard_limit_reached", "billing_not_active", "slow_down":
+	case "rate_limit_error", "rate_limit_exceeded", "usage_limit_reached", "too_many_requests", "insufficient_quota", "quota_exceeded", "billing_hard_limit_reached", "slow_down":
 		return true
 	}
 	return false
