@@ -62,6 +62,11 @@ func classifyHTTPFailure(statusCode int, message string) sdk.OutcomeKind {
 	if isDisabledAccountText(message) && (statusCode == 400 || statusCode == 403) {
 		return sdk.OutcomeAccountDead
 	}
+	// 中转会把确定性的客户端会话状态错误（function call 配对丢失等）包成 5xx 转发。
+	// 换账号重放必然复现，降级账号只会放大故障——按客户端错误透传，不 failover。
+	if statusCode >= 500 && isConversationStateText(message) {
+		return sdk.OutcomeClientError
+	}
 	switch statusCode {
 	case 429:
 		return sdk.OutcomeAccountRateLimited
@@ -215,6 +220,18 @@ func isClientRequestMachineSignal(value string) bool {
 		return true
 	}
 	return false
+}
+
+// isConversationStateText 请求携带的会话状态与上游不匹配（tool call 配对丢失等）。
+// 这类错误由请求 payload 决定，与所选账号无关。真实样本：bigsnake 中转 502
+// "No tool call found for function call output with call_id call_…"（2026-08-12）。
+func isConversationStateText(parts ...string) bool {
+	combined := strings.ToLower(strings.Join(parts, " "))
+	if combined == "" {
+		return false
+	}
+	return strings.Contains(combined, "no tool call found for function call output") ||
+		strings.Contains(combined, "no tool output found for function call")
 }
 
 func isTemporaryRateLimitText(parts ...string) bool {

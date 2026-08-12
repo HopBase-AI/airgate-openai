@@ -98,7 +98,7 @@ func (g *OpenAIGateway) forwardAPIKeyGeminiImageViaChat(ctx context.Context, req
 			sdk.LogFieldModel, modelName,
 			sdk.LogFieldError, err,
 		)
-		return transientOutcome(err.Error()), fmt.Errorf("请求上游失败: %w", err)
+		return upstreamTransportOutcome(ctx, err), fmt.Errorf("请求上游失败: %w", err)
 	}
 	defer cancel()
 	defer func() { _ = resp.Body.Close() }()
