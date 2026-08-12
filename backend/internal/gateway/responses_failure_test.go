@@ -887,3 +887,26 @@ func formatInt(v int64) string {
 	}
 	return string(buf)
 }
+
+// TestClassifyHTTPFailureConversationState502AsClientError 中转把 tool call 配对
+// 丢失包成 502：换账号重放必然复现，必须按 ClientError 透传（2026-08-12 生产样本）。
+func TestClassifyHTTPFailureConversationState502AsClientError(t *testing.T) {
+	msg := "No tool call found for function call output with call_id call_eTVUs8Fj"
+	for _, status := range []int{502, 503} {
+		if got := classifyHTTPFailure(status, msg); got != sdk.OutcomeClientError {
+			t.Fatalf("status %d: expected ClientError, got %v", status, got)
+		}
+	}
+	// 4xx 原本就是 ClientError，确保不回归
+	if got := classifyHTTPFailure(400, msg); got != sdk.OutcomeClientError {
+		t.Fatalf("400: expected ClientError, got %v", got)
+	}
+}
+
+// TestClassifyResponsesFailureConversationState in-band SSE 错误同样按 client 归类。
+func TestClassifyResponsesFailureConversationState(t *testing.T) {
+	failure := classifyResponsesError("server_error", "", "No tool output found for function call call_abc123")
+	if failure.Kind != responsesFailureKindClient {
+		t.Fatalf("expected client kind, got %v", failure.Kind)
+	}
+}

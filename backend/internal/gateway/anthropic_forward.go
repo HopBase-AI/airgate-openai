@@ -354,7 +354,7 @@ func (g *OpenAIGateway) forwardAnthropicResponses(
 			sdk.LogFieldError, err,
 			"protocol", "anthropic",
 		)
-		return transientOutcome(err.Error()), nil, fmt.Errorf("请求上游失败: %w", err)
+		return upstreamTransportOutcome(ctx, err), nil, fmt.Errorf("请求上游失败: %w", err)
 	}
 	defer cancel()
 	defer func() { _ = resp.Body.Close() }()

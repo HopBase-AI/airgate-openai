@@ -253,6 +253,13 @@ func classifyResponsesError(errType, errCode, msg string) *responsesFailureError
 			Code:               "safety_rejected",
 			Message:            msg,
 		}
+	case isConversationStateText(errType, errCode, msg):
+		return &responsesFailureError{
+			Kind:               responsesFailureKindClient,
+			StatusCode:         http.StatusBadRequest,
+			AnthropicErrorType: "invalid_request_error",
+			Message:            msg,
+		}
 	case containsAny(errType, errCode, msg, "invalid_prompt", "invalid_request", "input_too_long", "is not supported", "unsupported", "model_not_found", "model not found", "invalid model", "invalid_model", "does not exist"):
 		return &responsesFailureError{
 			Kind:               responsesFailureKindClient,

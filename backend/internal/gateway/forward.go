@@ -472,8 +472,8 @@ func (g *OpenAIGateway) forwardAPIKey(ctx context.Context, req *sdk.ForwardReque
 			sdk.LogFieldDurationMs, dur.Milliseconds(),
 			sdk.LogFieldError, err,
 		)
-		// 网络层错误，无上游 HTTP 响应
-		return transientOutcome(err.Error()), fmt.Errorf("请求上游失败: %w", err)
+		// 网络层错误，无上游 HTTP 响应；client 断开与守卫超时在此分责
+		return upstreamTransportOutcome(ctx, err), fmt.Errorf("请求上游失败: %w", err)
 	}
 	defer cancel()
 	defer func() { _ = resp.Body.Close() }()

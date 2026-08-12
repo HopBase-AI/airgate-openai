@@ -103,7 +103,7 @@ func (g *OpenAIGateway) forwardAPIKeyImagesViaResponsesTool(ctx context.Context,
 			sdk.LogFieldModel, req.Model,
 			sdk.LogFieldError, err,
 		)
-		return transientOutcome(err.Error()), fmt.Errorf("请求上游失败: %w", err)
+		return upstreamTransportOutcome(ctx, err), fmt.Errorf("请求上游失败: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 

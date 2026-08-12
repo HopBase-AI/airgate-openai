@@ -1,6 +1,8 @@
 package gateway
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -134,13 +136,33 @@ func isOverloadedText(s string) bool {
 }
 
 // transientOutcome 连接级 / 网络层错误（无上游 HTTP 响应），归类为 UpstreamTransient。
-// statusCode 给 0 或 502 均可，Core 不会基于此做判断。
+// 这里合成的 502 会随判决落进 account_events.upstream_status，排障时按 Reason 区分。
 func transientOutcome(reason string) sdk.ForwardOutcome {
 	return sdk.ForwardOutcome{
 		Kind:     sdk.OutcomeUpstreamTransient,
 		Upstream: sdk.UpstreamResponse{StatusCode: http.StatusBadGateway},
 		Reason:   reason,
 	}
+}
+
+// upstreamTransportOutcome 分类连接级 / 网络层错误。"context canceled" 有两个来源，
+// 定责必须分开：
+//   - 外层请求 ctx 已取消 —— 客户端在上游完成前断开，账号无辜，记 StreamAborted
+//     （核心不会因此降级账号）；
+//   - 外层 ctx 健康 —— 取消来自插件自身的首字节 / 流停滞守卫（doStreamableUpstream
+//     内部的 AfterFunc / stallGuard），上游确实过慢，维持 UpstreamTransient，
+//     但把原因改写成守卫超时语义，避免事件流里误读成客户端断开。
+func upstreamTransportOutcome(ctx context.Context, err error) sdk.ForwardOutcome {
+	if err != nil && errors.Is(err, context.Canceled) {
+		if ctx != nil && ctx.Err() != nil {
+			return streamAbortedOutcome(fmt.Errorf("客户端在上游请求完成前断开连接: %w", err), nil, 0)
+		}
+		return transientOutcome("上游首字节或流停滞超时（插件守卫断开）: " + err.Error())
+	}
+	if err == nil {
+		return transientOutcome("上游请求失败")
+	}
+	return transientOutcome(err.Error())
 }
 
 // streamAbortedOutcome reports a downstream/client-side stream failure without
