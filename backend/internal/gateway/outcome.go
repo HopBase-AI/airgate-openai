@@ -820,16 +820,16 @@ func accountBaseURLHost(account *sdk.Account) string {
 	return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(u.Hostname())), ".")
 }
 
+// imagePublicModelID 把上游响应回填的模型名还原成客户侧公开 ID。
+// 请求侧已确认是 gpt-image-2 公开模型时，响应一律还原成公开名：中转上游会以
+// 自家别名回填 model 字段（yhshu 的 gpt-image-2-124k、MiniMax 的 canvas-20 等），
+// 逐别名维护白名单跟不上接入速度——漏一个就是别名泄漏给客户端 + 注册表查不到价
+// 静默错档计费（关键字兜底 DefaultSpec）。非 gpt-image-2 请求保持原样透传。
 func imagePublicModelID(responseModel, fallbackModel string) string {
 	responseModel = strings.TrimSpace(responseModel)
 	fallbackModel = strings.TrimSpace(fallbackModel)
 	if !isGPTImage2PublicModel(fallbackModel) {
 		return responseModel
 	}
-	switch strings.ToLower(responseModel) {
-	case "gpt-image-2", "gpt-image-2-1k", "gpt-image-2-2k", "gpt-image-2-4k", yhshuGPTImage2UpstreamModel:
-		return fallbackModel
-	default:
-		return responseModel
-	}
+	return fallbackModel
 }

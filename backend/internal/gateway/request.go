@@ -170,6 +170,24 @@ func extractForwardedPath(headers http.Header) string {
 }
 
 // buildAPIKeyURL 根据账号 base_url 和请求路径构建上游 URL
+// imagesPathPrefixCredential 图像端点路径前缀覆盖：部分中转（如 MiniMax canvas-20）
+// 把 Images API 挂在模型专属路径下，生成/编辑分别为 <prefix>/generations、<prefix>/edits。
+const imagesPathPrefixCredential = "images_path_prefix"
+
+// upstreamImagesPath 按账号凭证覆盖图像请求的上游路径；非图像请求或未配置时原样返回。
+// 只改出站 URL，不改 reqPath 本身——响应分流、计费判定仍按客户侧原始路径。
+func upstreamImagesPath(account *sdk.Account, reqPath string) string {
+	prefix := accountCredential(account, imagesPathPrefixCredential)
+	if prefix == "" || !isImagesRequest(reqPath) {
+		return reqPath
+	}
+	prefix = "/" + strings.Trim(prefix, "/")
+	if strings.HasSuffix(reqPath, "/images/edits") {
+		return prefix + "/edits"
+	}
+	return prefix + "/generations"
+}
+
 func buildAPIKeyURL(account *sdk.Account, reqPath string) string {
 	baseURL := strings.TrimRight(account.Credentials["base_url"], "/")
 	if baseURL == "" {
