@@ -441,6 +441,11 @@ gateway:
           type: text
           required: false
           placeholder: 留空时保持 gpt-image-2；特殊上游可填写专用模型 ID
+        - key: images_path_prefix
+          label: 图像端点路径前缀
+          type: text
+          required: false
+          placeholder: 可选；非标图像中转的路径前缀，生成/编辑分别拼 /generations、/edits，例如 /v1/content/models/canvas-20
         - key: gemini_image_protocol
           label: Gemini 生图协议
           type: text

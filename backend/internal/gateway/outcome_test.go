@@ -61,3 +61,21 @@ func TestUpstreamTransportOutcomePlainNetworkError(t *testing.T) {
 		t.Fatalf("unexpected reason %q", got.Reason)
 	}
 }
+
+func TestImagePublicModelIDCollapsesRelayAliases(t *testing.T) {
+	cases := []struct {
+		responseModel, fallbackModel, want string
+	}{
+		{"canvas-20", "gpt-image-2", "gpt-image-2"},                        // MiniMax 别名还原
+		{"gpt-image-2-124k", "gpt-image-2", "gpt-image-2"},                 // yhshu 别名还原
+		{"gpt-image-2", "gpt-image-2-1k", "gpt-image-2-1k"},                // 公开变体保持请求侧口径
+		{"", "gpt-image-2", "gpt-image-2"},                                 // 响应缺 model 回退
+		{"gemini-3-pro-image", "gemini-3-pro-image", "gemini-3-pro-image"}, // 非 gpt-image-2 请求原样透传
+		{"whatever-model", "gpt-5.5", "whatever-model"},
+	}
+	for _, c := range cases {
+		if got := imagePublicModelID(c.responseModel, c.fallbackModel); got != c.want {
+			t.Errorf("imagePublicModelID(%q, %q) = %q, want %q", c.responseModel, c.fallbackModel, got, c.want)
+		}
+	}
+}

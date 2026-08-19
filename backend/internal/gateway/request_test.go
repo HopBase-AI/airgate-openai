@@ -480,3 +480,28 @@ func TestFirstNonEmptyTier_RequestFastFallsBackToUpstreamPriority(t *testing.T) 
 		t.Fatalf("firstNonEmptyTier(fast, priority) = %q, want %q", got, "priority")
 	}
 }
+
+func TestUpstreamImagesPathPrefixOverride(t *testing.T) {
+	account := &sdk.Account{Credentials: map[string]string{
+		"base_url":           "https://api.minimax.io",
+		"images_path_prefix": "/v1/content/models/canvas-20",
+	}}
+	cases := map[string]string{
+		"/v1/images/generations": "/v1/content/models/canvas-20/generations",
+		"/v1/images/edits":       "/v1/content/models/canvas-20/edits",
+		"/v1/chat/completions":   "/v1/chat/completions", // 非图像请求不受影响
+	}
+	for in, want := range cases {
+		if got := upstreamImagesPath(account, in); got != want {
+			t.Errorf("upstreamImagesPath(%q) = %q, want %q", in, got, want)
+		}
+	}
+	if got := buildAPIKeyURL(account, upstreamImagesPath(account, "/v1/images/generations")); got != "https://api.minimax.io/v1/content/models/canvas-20/generations" {
+		t.Errorf("最终 URL = %q", got)
+	}
+	// 未配置前缀：原样直通
+	plain := &sdk.Account{Credentials: map[string]string{"base_url": "https://relay.example.com"}}
+	if got := upstreamImagesPath(plain, "/v1/images/generations"); got != "/v1/images/generations" {
+		t.Errorf("无前缀应原样返回, got %q", got)
+	}
+}
