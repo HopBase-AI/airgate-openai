@@ -1,6 +1,7 @@
 package model
 
 import (
+	"math"
 	"strings"
 	"testing"
 )
@@ -386,24 +387,52 @@ func TestBuiltinGPT56Family(t *testing.T) {
 	}
 }
 
-// TestBuiltinGeminiImagePricing 锁定 Azure Gemini 生图线路的逐模型基准价。
-// 这些模型曾因共用 imgSpec 被全部误设为 GPT-5.5 的 5/0.5/30。
+// TestBuiltinGeminiImagePricing 锁定 Azure Gemini 生图线路的逐模型基准价与官方单张牌价。
+//
+// output 必须是 Google 的「图像输出档」单价，不是同名文本模型的 output 价。这里踩过两次：
+// 先是共用 imgSpec 被全部误设成 GPT-5.5 的 5/0.5/30，改正时又填成文本档的 12/3/1.5
+// （真值 120/60/30，差 10~20 倍）。生产靠 core 的 models.catalog 覆盖层兜住才没贱卖，
+// usage_metrics 的 unit_price 逐条证明实扣就是 120/60/30。
+// TestGeminiImageUnitPriceMetadata 保证官方单张牌价按 core 的 price.image.<档位>
+// 约定上报——模型广场靠它铺「官方基准价」，缺键就会退回 token 价充数。
+func TestGeminiImageUnitPriceMetadata(t *testing.T) {
+	ResetCatalogOverlay()
+	meta := toModelInfo("gemini-3-pro-image", Lookup("gemini-3-pro-image")).Metadata
+	for key, want := range map[string]string{
+		"price.image.1k": "0.1344",
+		"price.image.2k": "0.1344",
+		"price.image.4k": "0.24",
+	} {
+		if meta[key] != want {
+			t.Fatalf("%s = %q, want %q", key, meta[key], want)
+		}
+	}
+	// 出不了 4K 的型号不得声明 4K 价，否则广场会卖一个下单必然 400 的档位。
+	lite := toModelInfo("gemini-3.1-flash-lite-image", Lookup("gemini-3.1-flash-lite-image")).Metadata
+	for _, key := range []string{"price.image.2k", "price.image.4k"} {
+		if _, ok := lite[key]; ok {
+			t.Fatalf("gemini-3.1-flash-lite-image 只出 1K，不应声明 %s", key)
+		}
+	}
+}
+
 func TestBuiltinGeminiImagePricing(t *testing.T) {
 	ResetCatalogOverlay()
 	cases := []struct {
 		id                    string
 		input, cached, output float64
+		unit                  ImageUnitPrice
 	}{
-		{"gemini-2.5-flash-image", 0.3, 0.03, 30},
-		{"gemini-3-pro-image", 2, 0.2, 12},
-		{"gemini-3-pro-image-c", 2, 0.2, 12},
-		{"gemini-3-pro-image-preview", 2, 0.2, 12},
-		{"gemini-3-pro-image-preview-c", 2, 0.2, 12},
-		{"gemini-3.1-flash-image", 0.5, 0.05, 3},
-		{"gemini-3.1-flash-image-c", 0.5, 0.05, 3},
-		{"gemini-3.1-flash-image-preview", 0.5, 0.05, 3},
-		{"gemini-3.1-flash-image-preview-c", 0.5, 0.05, 3},
-		{"gemini-3.1-flash-lite-image", 0.25, 0.025, 1.5},
+		{"gemini-2.5-flash-image", 0.3, 0.03, 30, ImageUnitPrice{OneK: 0.0387}},
+		{"gemini-3-pro-image", 2, 0.2, 120, ImageUnitPrice{OneK: 0.1344, TwoK: 0.1344, FourK: 0.24}},
+		{"gemini-3-pro-image-c", 2, 0.2, 120, ImageUnitPrice{OneK: 0.1344, TwoK: 0.1344, FourK: 0.24}},
+		{"gemini-3-pro-image-preview", 2, 0.2, 120, ImageUnitPrice{OneK: 0.1344, TwoK: 0.1344, FourK: 0.24}},
+		{"gemini-3-pro-image-preview-c", 2, 0.2, 120, ImageUnitPrice{OneK: 0.1344, TwoK: 0.1344, FourK: 0.24}},
+		{"gemini-3.1-flash-image", 0.5, 0.05, 60, ImageUnitPrice{OneK: 0.0672, TwoK: 0.0672}},
+		{"gemini-3.1-flash-image-c", 0.5, 0.05, 60, ImageUnitPrice{OneK: 0.0672, TwoK: 0.0672}},
+		{"gemini-3.1-flash-image-preview", 0.5, 0.05, 60, ImageUnitPrice{OneK: 0.0672, TwoK: 0.0672}},
+		{"gemini-3.1-flash-image-preview-c", 0.5, 0.05, 60, ImageUnitPrice{OneK: 0.0672, TwoK: 0.0672}},
+		{"gemini-3.1-flash-lite-image", 0.25, 0.025, 30, ImageUnitPrice{OneK: 0.0336}},
 	}
 	for _, c := range cases {
 		t.Run(c.id, func(t *testing.T) {
@@ -420,6 +449,21 @@ func TestBuiltinGeminiImagePricing(t *testing.T) {
 			}
 			if spec.InputPriceFlex != c.input*0.5 || spec.CachedPriceFlex != c.cached*0.5 || spec.OutputPriceFlex != c.output*0.5 {
 				t.Fatalf("flex 价未按标准价 x0.5 派生: %+v", spec)
+			}
+			if spec.ImageUnit != c.unit {
+				t.Fatalf("官方单张牌价 = %+v, want %+v", spec.ImageUnit, c.unit)
+			}
+			// 单张牌价按「每张图的图像 output token 数 x output 单价」推导，
+			// 1K/2K = 1120 token、4K = 2000 token（2.5-flash-image 为 1290）。
+			tokens := map[string]float64{"1k": 1120, "2k": 1120, "4k": 2000}
+			if c.id == "gemini-2.5-flash-image" {
+				tokens["1k"] = 1290
+			}
+			for _, tier := range spec.ImageUnit.Tiers() {
+				want := tokens[tier.Tier] * c.output / 1e6
+				if math.Abs(tier.Price-want) > 1e-9 {
+					t.Fatalf("%s 单张牌价 = %v, 按 token 口径应为 %v", tier.Tier, tier.Price, want)
+				}
 			}
 		})
 	}

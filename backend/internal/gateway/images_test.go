@@ -502,14 +502,16 @@ func TestFillUsageCostPerImageBySize_GeminiUsesDedicatedPrice(t *testing.T) {
 	usage := newTokenUsage(modelID, "", 198, 1571, 0, 0, 0)
 	fillUsageCostPerImageBySize(usage, 1, "1264x848", "")
 
-	want := tokenCost(198, 0.5) + tokenCost(1571, 3)
+	// 3.1-flash 的图像 output 档是 $60/1M，不是同名文本模型的 $3——生产
+	// usage_metrics 的 unit_price 也是 60。
+	want := tokenCost(198, 0.5) + tokenCost(1571, 60)
 	if !almostEqual(usage.AccountCost, want, 1e-12) {
 		t.Fatalf("AccountCost = %v, want %v", usage.AccountCost, want)
 	}
 	if got, wantModel := usageCostMetadata(usage, usageCostImage, "billing_model"), modelID; got != wantModel {
 		t.Fatalf("image billing_model = %q, want %q", got, wantModel)
 	}
-	if got, wantPrice := usageImageUnitPrice(usage), "3"; got != wantPrice {
+	if got, wantPrice := usageImageUnitPrice(usage), "60"; got != wantPrice {
 		t.Fatalf("image unit_price = %q, want %q", got, wantPrice)
 	}
 }

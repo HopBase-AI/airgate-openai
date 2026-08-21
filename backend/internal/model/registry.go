@@ -37,6 +37,12 @@ type Spec struct {
 	// 默认按对话模型价格计费；纯图像接口没有对话模型时回退到 gpt-5.5 价格。
 	ImageOnly bool
 
+	// ImageUnit 官方单张牌价（$/张），按分辨率档位。
+	// 只填该模型真实出得了的档位——档位须与 gateway 的 imageModelSupportedSizes
+	// 对齐，否则模型广场会给出不了 4K 的模型标 4K 价。
+	// 纯展示锚点：计费仍走 Forward 的 token 口径，不读这里。
+	ImageUnit ImageUnitPrice
+
 	// Priority 档单价（$/1M tokens）。零值表示未配置，由 SDK 以标准 × 2 兜底。
 	InputPricePriority  float64
 	CachedPricePriority float64
@@ -90,6 +96,42 @@ func withPriorityMultiplier(s Spec, multiplier float64) Spec {
 func pricedImageSpec(name string, input, cached, output float64) Spec {
 	s := std(name, 32000, 0, input, cached, output)
 	s.ImageOnly = true
+	return s
+}
+
+// ImageUnitPrice 官方单张牌价（$/张）按分辨率档位。0 = 该模型出不了这个档位，
+// 模型广场不会为它铺价。刻意用可比较的定长结构而非 map：Spec 要保持可比较。
+type ImageUnitPrice struct {
+	OneK  float64
+	TwoK  float64
+	FourK float64
+}
+
+// Tiers 按 core 的 price.image.<档位> 约定铺开非零档位（1k / 2k / 4k）。
+func (p ImageUnitPrice) Tiers() []struct {
+	Tier  string
+	Price float64
+} {
+	all := []struct {
+		Tier  string
+		Price float64
+	}{{"1k", p.OneK}, {"2k", p.TwoK}, {"4k", p.FourK}}
+	out := all[:0:0]
+	for _, tier := range all {
+		if tier.Price > 0 {
+			out = append(out, tier)
+		}
+	}
+	return out
+}
+
+// withImageUnitPrices 给纯图像模型附上官方单张牌价（$/张）。
+// 计算口径：Google 按「每张图固定的图像 output token 数 × output 单价」计价，
+// 1K / 2K 同为 1120 token、4K 为 2000 token（gemini-2.5-flash-image 为 1290）。
+// 该口径复现了 Google 公布的每张价（3-pro-image 1K/2K $0.134、4K $0.24；
+// 2.5-flash-image $0.039），生产 usage_metrics 的 image_cost 也与之逐条吻合。
+func withImageUnitPrices(s Spec, oneK, twoK, fourK float64) Spec {
+	s.ImageUnit = ImageUnitPrice{OneK: oneK, TwoK: twoK, FourK: fourK}
 	return s
 }
 
@@ -153,16 +195,35 @@ var registry = map[string]Spec{
 	// ── OpenAI-compatible Gemini image relays（Nano Banana 系列）──
 	// Azure Gemini 分组使用同一组官方模型基准价，再由 Core 套分组倍率。
 	// -c 是协议变体，与对应非 -c 型号同价。
-	"gemini-2.5-flash-image":           pricedImageSpec("Gemini 2.5 Flash Image", 0.3, 0.03, 30.0),
-	"gemini-3-pro-image":               pricedImageSpec("Gemini 3 Pro Image", 2.0, 0.2, 12.0),
-	"gemini-3-pro-image-c":             pricedImageSpec("Gemini 3 Pro Image C", 2.0, 0.2, 12.0),
-	"gemini-3-pro-image-preview":       pricedImageSpec("Gemini 3 Pro Image Preview", 2.0, 0.2, 12.0),
-	"gemini-3-pro-image-preview-c":     pricedImageSpec("Gemini 3 Pro Image Preview C", 2.0, 0.2, 12.0),
-	"gemini-3.1-flash-image":           pricedImageSpec("Gemini 3.1 Flash Image", 0.5, 0.05, 3.0),
-	"gemini-3.1-flash-image-c":         pricedImageSpec("Gemini 3.1 Flash Image C", 0.5, 0.05, 3.0),
-	"gemini-3.1-flash-image-preview":   pricedImageSpec("Gemini 3.1 Flash Image Preview", 0.5, 0.05, 3.0),
-	"gemini-3.1-flash-image-preview-c": pricedImageSpec("Gemini 3.1 Flash Image Preview C", 0.5, 0.05, 3.0),
-	"gemini-3.1-flash-lite-image":      pricedImageSpec("Gemini 3.1 Flash Lite Image", 0.25, 0.025, 1.5),
+	//
+	// ⚠️ output 是「图像输出档」单价，不是同名文本模型的 output 价：Google 对
+	// 图像 output token 单独计价（3-pro $120、3.1-flash $60、flash-lite/2.5-flash $30
+	// 每 1M）。这里曾误填成文本档的 12 / 3 / 1.5，靠 core 的 models.catalog 覆盖层
+	// 兜着才没卖错价；覆盖层一旦清空就会静默 10~20 倍贱卖，故内置值必须自洽。
+	// 与 extensions/airgate-gemini 的 imageModelSpecs 保持同一组数字。
+	//
+	// 单张牌价的档位必须与 gateway/image_model_limits.go 的 imageModelSupportedSizes
+	// 对齐：flash-lite 与 2.5-flash 只出 1K，3.1-flash 最高 2K，只有 3-pro 出得了 4K。
+	"gemini-2.5-flash-image": withImageUnitPrices(
+		pricedImageSpec("Gemini 2.5 Flash Image", 0.3, 0.03, 30.0), 0.0387, 0, 0),
+	"gemini-3-pro-image": withImageUnitPrices(
+		pricedImageSpec("Gemini 3 Pro Image", 2.0, 0.2, 120.0), 0.1344, 0.1344, 0.24),
+	"gemini-3-pro-image-c": withImageUnitPrices(
+		pricedImageSpec("Gemini 3 Pro Image C", 2.0, 0.2, 120.0), 0.1344, 0.1344, 0.24),
+	"gemini-3-pro-image-preview": withImageUnitPrices(
+		pricedImageSpec("Gemini 3 Pro Image Preview", 2.0, 0.2, 120.0), 0.1344, 0.1344, 0.24),
+	"gemini-3-pro-image-preview-c": withImageUnitPrices(
+		pricedImageSpec("Gemini 3 Pro Image Preview C", 2.0, 0.2, 120.0), 0.1344, 0.1344, 0.24),
+	"gemini-3.1-flash-image": withImageUnitPrices(
+		pricedImageSpec("Gemini 3.1 Flash Image", 0.5, 0.05, 60.0), 0.0672, 0.0672, 0),
+	"gemini-3.1-flash-image-c": withImageUnitPrices(
+		pricedImageSpec("Gemini 3.1 Flash Image C", 0.5, 0.05, 60.0), 0.0672, 0.0672, 0),
+	"gemini-3.1-flash-image-preview": withImageUnitPrices(
+		pricedImageSpec("Gemini 3.1 Flash Image Preview", 0.5, 0.05, 60.0), 0.0672, 0.0672, 0),
+	"gemini-3.1-flash-image-preview-c": withImageUnitPrices(
+		pricedImageSpec("Gemini 3.1 Flash Image Preview C", 0.5, 0.05, 60.0), 0.0672, 0.0672, 0),
+	"gemini-3.1-flash-lite-image": withImageUnitPrices(
+		pricedImageSpec("Gemini 3.1 Flash Lite Image", 0.25, 0.025, 30.0), 0.0336, 0, 0),
 
 	// ── DeepSeek（OpenAI 兼容协议，经 TokenHub 转发）──
 	// TokenHub 实际基础价（每 1M tokens）为 ¥1 / ¥0.2 / ¥2；按项目固定汇率
@@ -400,6 +461,11 @@ func priceMetadata(spec Spec, meta map[string]string) map[string]string {
 	put("price.flex_input", spec.InputPriceFlex)
 	put("price.flex_cached_input", spec.CachedPriceFlex)
 	put("price.flex_output", spec.OutputPriceFlex)
+	// 官方单张牌价（$/张）。core 解析 price.image.<档位> 后，模型广场按档位铺价，
+	// 不再拿 token 价充数；未声明档位的模型仍回落 token 展示。
+	for _, tier := range spec.ImageUnit.Tiers() {
+		put("price.image."+tier.Tier, tier.Price)
+	}
 	if spec.LongContextThreshold > 0 {
 		meta["long_context.threshold"] = strconv.Itoa(spec.LongContextThreshold)
 		put("long_context.input_multiplier", spec.LongContextInputMultiplier)
