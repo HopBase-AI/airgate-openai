@@ -4,11 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"math"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/tidwall/gjson"
 
 	sdk "github.com/DouDOU-start/airgate-sdk/sdkgo"
 
@@ -34,6 +38,7 @@ const (
 	usageMetricOutputTokens          = "output_tokens"
 	usageMetricReasoningOutputTokens = "reasoning_output_tokens"
 	usageMetricTotalTokens           = "total_tokens"
+	usageMetricServerToolCalls       = "server_tool_calls"
 	usageMetricImages                = "images"
 
 	usageCostInput       = "input_tokens"
@@ -295,6 +300,89 @@ func billableOutputTokens(modelID string, outputTokens, reasoningTokens int, cha
 		return outputTokens + reasoningTokens
 	}
 	return outputTokens
+}
+
+// serverSideToolCallPrices xAI server-side 工具每次调用官方单价（$/次，
+// docs.x.ai 2026-08 口径：web/x_search/代码执行/文档搜索 $5/1K，文件 $10/1K）。
+// 实测锚点：9 次 x_search 的 cost ticks 恰好比纯 token 费多 $0.045。
+// mcp（客户自己的远端服务）与 image_generation（若计费应体现在 ticks 漂移
+// 告警里再补）暂按 0；未知类型按 defaultServerToolCallPrice 兜底，宁收勿漏。
+var serverSideToolCallPrices = map[string]float64{
+	"web_search_calls":       0.005,
+	"x_search_calls":         0.005,
+	"code_interpreter_calls": 0.005,
+	"document_search_calls":  0.005,
+	"file_search_calls":      0.01,
+	"mcp_calls":              0,
+	"image_generation_calls": 0,
+}
+
+const defaultServerToolCallPrice = 0.005
+
+// serverToolDetailsFromNode usage.server_side_tool_usage_details → 类型计数表。
+func serverToolDetailsFromNode(node gjson.Result) map[string]int {
+	if !node.IsObject() {
+		return nil
+	}
+	var details map[string]int
+	for key, value := range node.Map() {
+		if count := int(value.Int()); count > 0 {
+			if details == nil {
+				details = map[string]int{}
+			}
+			details[key] = count
+		}
+	}
+	return details
+}
+
+// setServerToolCallsMetric 把 server-side 工具调用次数落成指标；成本在
+// fillUsageCostForModel 里按模型 Spec 决定是否计费。类型细分进 metadata。
+func setServerToolCallsMetric(usage *sdk.Usage, totalCalls int, details map[string]int) {
+	if usage == nil || totalCalls <= 0 {
+		return
+	}
+	metadata := make(map[string]string, len(details))
+	for key, count := range details {
+		metadata[key] = strconv.Itoa(count)
+	}
+	setUsageMetric(usage, sdk.UsageMetric{
+		Key:      usageMetricServerToolCalls,
+		Label:    "服务器工具调用",
+		Kind:     "tool",
+		Unit:     "call",
+		Value:    float64(totalCalls),
+		Metadata: metadata,
+	})
+}
+
+// setUpstreamCostTicks 记录上游官方口径成本刻度（$×1e10），仅供计费漂移告警。
+func setUpstreamCostTicks(usage *sdk.Usage, ticks int64) {
+	if usage == nil || ticks <= 0 {
+		return
+	}
+	if usage.Metadata == nil {
+		usage.Metadata = map[string]string{}
+	}
+	usage.Metadata["upstream_cost_ticks"] = strconv.FormatInt(ticks, 10)
+}
+
+// serverToolCallsCost 按类型计数表算工具费；总数超出已知类型之和的部分按
+// 兜底单价计（宁收勿漏，与 DefaultSpec 同哲学）。
+func serverToolCallsCost(totalCalls int, details map[string]int) float64 {
+	cost, counted := 0.0, 0
+	for key, count := range details {
+		price, known := serverSideToolCallPrices[key]
+		if !known {
+			price = defaultServerToolCallPrice
+		}
+		cost += float64(count) * price
+		counted += count
+	}
+	if totalCalls > counted {
+		cost += float64(totalCalls-counted) * defaultServerToolCallPrice
+	}
+	return cost
 }
 
 func setUsageTokens(usage *sdk.Usage, inputTokens, outputTokens, cachedInputTokens, reasoningOutputTokens int) {
@@ -594,6 +682,79 @@ func fillUsageCostForModel(usage *sdk.Usage, billingModelID string, includeOutpu
 		Currency:    usageCurrencyUSD,
 		Metadata:    outputMetadata,
 	})
+	toolCost := applyServerToolCallsCost(usage, spec)
+	warnUpstreamCostDrift(usage, spec, inputCost+cachedCost+outputCost+toolCost)
+}
+
+// applyServerToolCallsCost 对声明了 BillServerSideTools 的模型把 server-side
+// 工具调用费落进 usage：指标补 AccountCost，费用明细挂在 core 认识的 "output"
+// 键下（与 "output_tokens" 明细互不覆盖，一并归入输出费管道）。刻意不写
+// unit_price——core 会把它当 token 单价快照，污染报表。
+func applyServerToolCallsCost(usage *sdk.Usage, spec model.Spec) float64 {
+	if usage == nil || !spec.BillServerSideTools {
+		return 0
+	}
+	var metric *sdk.UsageMetric
+	for index := range usage.Metrics {
+		if usage.Metrics[index].Key == usageMetricServerToolCalls {
+			metric = &usage.Metrics[index]
+			break
+		}
+	}
+	if metric == nil || metric.Value <= 0 {
+		return 0
+	}
+	details := make(map[string]int, len(metric.Metadata))
+	for key, raw := range metric.Metadata {
+		if count, err := strconv.Atoi(raw); err == nil && count > 0 {
+			details[key] = count
+		}
+	}
+	cost := serverToolCallsCost(int(metric.Value), details)
+	if cost <= 0 {
+		return 0
+	}
+	metric.AccountCost = cost
+	metric.Currency = usageCurrencyUSD
+	detailMetadata := map[string]string{
+		"calls": fmt.Sprintf("%d", int(metric.Value)),
+		"unit":  "USD/call",
+	}
+	for key, count := range details {
+		detailMetadata[key] = strconv.Itoa(count)
+	}
+	setUsageCostDetail(usage, sdk.UsageCostDetail{
+		Key:         "output",
+		Label:       "服务器工具调用",
+		AccountCost: cost,
+		Currency:    usageCurrencyUSD,
+		Metadata:    detailMetadata,
+	})
+	return cost
+}
+
+// warnUpstreamCostDrift 上游成本刻度（官方 $×1e10）与我们按官方价复算的基数
+// 偏差超过 1% 时告警——新的未建模费用项（新工具类型、sources 计费等）第一时间
+// 在这里现形，防静默漏收（gpt-5.6 事故同款探测器思路）。
+func warnUpstreamCostDrift(usage *sdk.Usage, spec model.Spec, computedCost float64) {
+	if usage == nil || !spec.BillServerSideTools || usage.Metadata == nil {
+		return
+	}
+	ticks, err := strconv.ParseInt(usage.Metadata["upstream_cost_ticks"], 10, 64)
+	if err != nil || ticks <= 0 {
+		return
+	}
+	upstreamCost := float64(ticks) / 1e10
+	diff := math.Abs(upstreamCost - computedCost)
+	if diff <= 0.0001 || diff <= upstreamCost*0.01 {
+		return
+	}
+	slog.Warn("grok_billing_drift",
+		"model", usage.Model,
+		"upstream_cost_usd", fmt.Sprintf("%.6f", upstreamCost),
+		"computed_cost_usd", fmt.Sprintf("%.6f", computedCost),
+		"hint", "上游官方口径成本与复算基数偏差>1%,可能有未建模的计费项(新工具类型/sources等)",
+	)
 }
 
 func imageTokenBillingModel(modelID string) string {

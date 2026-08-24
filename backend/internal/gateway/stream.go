@@ -623,6 +623,8 @@ func handleNonStreamResponse(resp *http.Response, w http.ResponseWriter, start t
 		parsed.reasoningOutputTokens,
 		elapsed.Milliseconds(),
 	)
+	setServerToolCallsMetric(usage, parsed.serverToolCalls, parsed.serverToolDetails)
+	setUpstreamCostTicks(usage, parsed.upstreamCostTicks)
 	numImages := parsed.imageGenCallCount
 	if numImages <= 0 {
 		numImages = estimateImageCountFromTokens(parsed.toolImageOutputTokens)
@@ -1065,6 +1067,9 @@ func parseSSEUsage(data []byte, out *sdk.Usage, toolImageIn, toolImageOut *int) 
 				inputTokens -= cachedInputTokens
 			}
 			setUsageTokens(out, inputTokens, outputTokens, cachedInputTokens, reasoningOutputTokens)
+			setServerToolCallsMetric(out,
+				int(usage.Get("num_server_side_tools_used").Int()),
+				serverToolDetailsFromNode(usage.Get("server_side_tool_usage_details")))
 		}
 		if imgTool := resp.Get("tool_usage.image_gen"); imgTool.Exists() {
 			if toolImageIn != nil {
@@ -1092,6 +1097,9 @@ func parseSSEUsage(data []byte, out *sdk.Usage, toolImageIn, toolImageOut *int) 
 		// chat completions 流式 chunk：grok 口径的 completion_tokens 不含 reasoning，须并入。
 		outputTokens = billableOutputTokens(out.Model, outputTokens, reasoningOutputTokens, true)
 		setUsageTokens(out, inputTokens, outputTokens, cachedInputTokens, reasoningOutputTokens)
+		setServerToolCallsMetric(out,
+			int(usage.Get("num_server_side_tools_used").Int()),
+			serverToolDetailsFromNode(usage.Get("server_side_tool_usage_details")))
 	}
 }
 
@@ -1160,6 +1168,13 @@ type openaiUsage struct {
 	// grok 系上游该口径的 completion_tokens 不含 reasoning，计费时须并入；
 	// Responses 口径（object=response）已含，禁止再并入（见 billableOutputTokens）。
 	chatCompletionStyle bool
+	// serverToolCalls xAI server-side 工具调用总次数（usage.num_server_side_tools_used），
+	// serverToolDetails 按工具类型细分（usage.server_side_tool_usage_details）。
+	serverToolCalls   int
+	serverToolDetails map[string]int
+	// upstreamCostTicks 上游报的官方口径成本刻度（$×1e10；chat 口径叫 cost，
+	// Responses 口径叫 cost_in_usd_ticks），仅用于计费漂移告警，不直接入账。
+	upstreamCostTicks int64
 	// image_generation tool 的用量，从 response.tool_usage.image_gen 提取。
 	// 按本次对话模型单价单独归集，便于 Core 对生成图片输出做固定价覆盖。
 	toolImageInputTokens  int
@@ -1220,6 +1235,23 @@ func parseUsage(body []byte) openaiUsage {
 	usage.reasoningOutputTokens = int(usageNode.Get("output_tokens_details.reasoning_tokens").Int())
 	if usage.reasoningOutputTokens == 0 {
 		usage.reasoningOutputTokens = int(usageNode.Get("completion_tokens_details.reasoning_tokens").Int())
+	}
+
+	// xAI server-side 工具调用次数与上游成本刻度（BillServerSideTools 模型计费用）。
+	usage.serverToolCalls = int(usageNode.Get("num_server_side_tools_used").Int())
+	if details := usageNode.Get("server_side_tool_usage_details"); details.IsObject() {
+		for key, value := range details.Map() {
+			if count := int(value.Int()); count > 0 {
+				if usage.serverToolDetails == nil {
+					usage.serverToolDetails = map[string]int{}
+				}
+				usage.serverToolDetails[key] = count
+			}
+		}
+	}
+	usage.upstreamCostTicks = usageNode.Get("cost_in_usd_ticks").Int()
+	if usage.upstreamCostTicks == 0 {
+		usage.upstreamCostTicks = usageNode.Get("cost").Int()
 	}
 
 	// tool_usage.image_gen 位于 response 顶层（与 usage 平级），Responses 响应体里可能

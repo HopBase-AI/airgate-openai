@@ -70,6 +70,13 @@ type Spec struct {
 	// 回复的输出费几乎全漏（实测一条回复 completion=1、reasoning=158）。
 	OutputExcludesReasoning bool
 
+	// BillServerSideTools 标记上游按次计费 server-side 工具调用（xAI 口径：
+	// usage.num_server_side_tools_used / server_side_tool_usage_details，
+	// web/x_search/代码执行/文档搜索 $5/1K 次等，独立于 token 费）。实测
+	// 9 次 x_search 的 cost ticks 恰好比纯 token 费多 $0.045——不计会把
+	// 搜索型调用卖到贴地甚至倒亏。价表见 gateway serverSideToolCallPrices。
+	BillServerSideTools bool
+
 	// ImagePerUnitBilling 标记按「张 × 分辨率档」计费的图像模型（xAI Grok
 	// Imagine 口径：响应体没有任何 token usage，只能按张计费）。计费读
 	// ImageUnit 档位单价与 ImageInputUnitPrice，token 价仅作异常兜底。
@@ -181,6 +188,7 @@ func grokChat(name string, ctx int, input, cached, output float64) Spec {
 		LongContextOutputMultiplier: 2.0,
 		LongContextCachedMultiplier: 2.0,
 		OutputExcludesReasoning:     true,
+		BillServerSideTools:         true,
 	}
 }
 
