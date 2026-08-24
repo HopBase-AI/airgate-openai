@@ -2899,3 +2899,48 @@ func TestBuildImagesToolCreateMsg_Edit_GPTImage2_SkipsInputFidelity(t *testing.T
 		t.Errorf("edit-target constraint missing: %q", prompt)
 	}
 }
+
+// TestGPTImage2FollowsOfficialArbitrarySizeRule gpt-image-2 的官方口径是**任意分辨率**:
+// 宽高各能被 16 整除、长短边比在 1:3~3:1、不超过 3840×2160。
+//
+// 回归背景(2026-08-24):此前这里用的是一张 19 条的固定枚举白名单,把大量官方合法
+// 尺寸拒成 400。下面六个尺寸当时全被拒,而直连真实上游逐个实测均 HTTP 200 且出图
+// 尺寸与请求分毫不差——挡住客户的是我们自己而不是上游。
+func TestGPTImage2FollowsOfficialArbitrarySizeRule(t *testing.T) {
+	// 六个真实世界尺寸,均已对上游实测出图成功。
+	verifiedAgainstUpstream := []string{
+		"720x1280", // 9:16 竖屏
+		"1152x864", // 4:3
+		"864x1152", // 3:4
+		"864x2592", // 正好 1:3 边界
+		"1952x800", // 2.44:1 宽幅
+		"1024x640", // 正好卡在最小像素数 655360
+	}
+	for _, size := range verifiedAgainstUpstream {
+		for _, model := range []string{"gpt-image-2", "gpt-image-2-low"} {
+			if err := validateImageModelSize(model, size); err != nil {
+				t.Errorf("%s 拒绝了官方合法尺寸 %s: %v(上游实测该尺寸可出图)", model, size, err)
+			}
+		}
+	}
+
+	// 官方规则的四条边界,越界必须拒。
+	rejects := []struct {
+		size, why string
+	}{
+		{"1000x1000", "宽高不是 16 的倍数"},
+		{"800x2560", "长短边比 3.2:1 超过 3:1"},
+		{"3856x2160", "边长超过 3840"},
+		{"640x640", "总像素 409600 低于下限 655360"},
+	}
+	for _, tc := range rejects {
+		if err := validateImageModelSize("gpt-image-2", tc.size); err == nil {
+			t.Errorf("gpt-image-2 应拒绝 %s(%s)", tc.size, tc.why)
+		}
+	}
+
+	// 枚举白名单仍然管住真的只支持固定档的 Gemini 系,别把这条一起放开。
+	if err := validateImageModelSize("gemini-3.1-flash-lite-image", "1152x864"); err == nil {
+		t.Error("Gemini lite 只支持固定档位,不该跟着 gpt-image-2 放开任意尺寸")
+	}
+}
