@@ -151,7 +151,7 @@ func (g *OpenAIGateway) forwardAPIKeyGeminiImageViaChat(ctx context.Context, req
 		Header:     http.Header{"Content-Type": []string{"application/json"}},
 		Body:       io.NopCloser(bytes.NewReader(imagesBody)),
 	}
-	return g.handleImagesResponse(mockResp, req.Writer, nil, start, modelName, imgReq.Size)
+	return g.handleImagesResponse(mockResp, req.Writer, nil, start, modelName, imgReq)
 }
 
 func buildGeminiImageChatRequestBody(modelName string, req *imagesRequest) ([]byte, error) {

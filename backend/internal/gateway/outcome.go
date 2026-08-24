@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -285,6 +286,14 @@ func setUsageImageSize(usage *sdk.Usage, size string) {
 func setUsageTokens(usage *sdk.Usage, inputTokens, outputTokens, cachedInputTokens, reasoningOutputTokens int) {
 	if usage == nil {
 		return
+	}
+	// xAI Grok 口径：上游 completion_tokens 不含 reasoning tokens（与 OpenAI 相反，
+	// 实测 completion=1 / reasoning=158 而官方按 159 计输出费）。对声明了
+	// OutputExcludesReasoning 的模型把推理 token 并入计费输出。SSE 与非流式
+	// 两条路径调用本函数前 usage.Model 均已就位；重复调用是按 key 替换语义，
+	// 每次都从上游原始值重算，不会累加。
+	if reasoningOutputTokens > 0 && model.Lookup(usage.Model).OutputExcludesReasoning {
+		outputTokens += reasoningOutputTokens
 	}
 	setUsageMetric(usage, sdk.UsageMetric{
 		Key:   usageMetricInputTokens,
@@ -629,6 +638,93 @@ func fillUsageCostPerImageBySize(usage *sdk.Usage, numImages int, size, quality 
 	cost := tokenCost(outputTokens, prices.output)
 	setUsageImageSize(usage, size)
 	addImageOutputCost(usage, usageCostImage, "图片生成", numImages, cost, size, quality, outputTokens, prices.output, billingModelID)
+}
+
+// imageBillingBaseCostOverrideMetadataKey 与 core/internal/plugin/image_pricing.go
+// 及 gateway-seedance 的按张计费口径共用同一约定键：插件声明整单官方零售基数，
+// core 分别乘分组计费倍率与销售倍率，账号成本 = 基数 × 账号倍率。
+const imageBillingBaseCostOverrideMetadataKey = "image_billing_base_cost_override"
+
+// fillUsagePerUnitImageCost 按张计费（xAI Grok Imagine 口径）：
+// 输出费 = 张数 × ImageUnit 档位官方单价（resolution 1k/2k；缺省、未知档或该
+// 模型没有 2k 档时按 1k 计，与上游实测缺省档一致），输入参考图费 = 张数 ×
+// ImageInputUnitPrice。上游响应没有任何 token usage，token 指标保持 0。
+func fillUsagePerUnitImageCost(usage *sdk.Usage, spec model.Spec, numImages int, resolution string, inputImages int) {
+	if usage == nil || numImages <= 0 {
+		return
+	}
+	tier := strings.ToLower(strings.TrimSpace(resolution))
+	unit := spec.ImageUnit.OneK
+	if tier == "2k" && spec.ImageUnit.TwoK > 0 {
+		unit = spec.ImageUnit.TwoK
+	} else {
+		tier = "1k"
+	}
+	if usage.Metadata == nil {
+		usage.Metadata = map[string]string{}
+	}
+	if unit <= 0 {
+		// 档位无价：不铸造成本，标记留痕（与视频 unpriced 口径一致，靠告警人工补价）。
+		usage.Metadata["billing_mode"] = "unpriced"
+		return
+	}
+	outputCost := float64(numImages) * unit
+	metadata := map[string]string{
+		"unit_price":  fmt.Sprintf("%.10g", unit),
+		"unit":        "USD/image",
+		"image_count": fmt.Sprintf("%d", numImages),
+		"image_tier":  tier,
+	}
+	setUsageMetric(usage, sdk.UsageMetric{
+		Key:         usageMetricImages,
+		Label:       "图片数量",
+		Kind:        "image",
+		Unit:        "image",
+		Value:       float64(numImages),
+		AccountCost: outputCost,
+		Currency:    usageCurrencyUSD,
+		Metadata:    metadata,
+	})
+	setUsageCostDetail(usage, sdk.UsageCostDetail{
+		Key:         usageCostImage,
+		Label:       "图片生成",
+		AccountCost: outputCost,
+		Currency:    usageCurrencyUSD,
+		Metadata:    metadata,
+	})
+	inputCost := 0.0
+	if inputImages > 0 && spec.ImageInputUnitPrice > 0 {
+		// 上游实测口径：输入参考图费每次请求收一次，与张数无关
+		// （1 张、2 张编辑同为 +1 单位，官方 "adds 0.25x base once per request"）。
+		inputCost = spec.ImageInputUnitPrice
+		inputMetadata := map[string]string{
+			"unit_price":  fmt.Sprintf("%.10g", spec.ImageInputUnitPrice),
+			"unit":        "USD/image",
+			"image_count": fmt.Sprintf("%d", inputImages),
+		}
+		setUsageMetric(usage, sdk.UsageMetric{
+			Key:         "input_reference_images",
+			Label:       "输入参考图",
+			Kind:        "image",
+			Unit:        "image",
+			Value:       float64(inputImages),
+			AccountCost: inputCost,
+			Currency:    usageCurrencyUSD,
+			Metadata:    inputMetadata,
+		})
+		// key 用 image_input_tokens：core usage_adapter 只认这个键归入 ImageInputCost。
+		setUsageCostDetail(usage, sdk.UsageCostDetail{
+			Key:         "image_input_tokens",
+			Label:       "输入参考图",
+			AccountCost: inputCost,
+			Currency:    usageCurrencyUSD,
+			Metadata:    inputMetadata,
+		})
+	}
+	usage.Metadata["billing_mode"] = "per_image"
+	usage.Metadata["image_tier"] = tier
+	usage.Metadata[imageBillingBaseCostOverrideMetadataKey] =
+		strconv.FormatFloat(outputCost+inputCost, 'f', -1, 64)
 }
 
 func addUsageCostForModel(
