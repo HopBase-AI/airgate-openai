@@ -578,14 +578,11 @@ func validatePerUnitImagesRequest(spec model.Spec, imgReq *imagesRequest) error 
 	if imgReq == nil {
 		return nil
 	}
-	if res := strings.ToLower(strings.TrimSpace(imgReq.Resolution)); res != "" {
-		if res != "1k" && !(res == "2k" && spec.ImageUnit.TwoK > 0) {
-			supported := "1k"
-			if spec.ImageUnit.TwoK > 0 {
-				supported = "1k / 2k"
-			}
-			return fmt.Errorf("该模型 resolution 仅支持 %s", supported)
-		}
+	// 官方枚举全系一致:resolution 仅 1k / 2k(4k 上游 422 实测),与该型号的
+	// 价目档无关——基础版传 2k 上游照收、按平价计费(计费侧无 2k 价时自动回落
+	// 1k 档单价),不得按价目档收窄合法枚举(可选性审计教训:2026-08-25 曾误拦)。
+	if res := strings.ToLower(strings.TrimSpace(imgReq.Resolution)); res != "" && res != "1k" && res != "2k" {
+		return fmt.Errorf("resolution 仅支持 1k / 2k")
 	}
 	if imgReq.Mask != "" {
 		return fmt.Errorf("该模型不支持 mask 参数")

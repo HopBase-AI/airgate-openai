@@ -164,7 +164,8 @@ func TestValidatePerUnitImagesRequest(t *testing.T) {
 		{"合法 2k", spec20, &imagesRequest{Resolution: "2k"}, ""},
 		{"缺省档", spec20, &imagesRequest{}, ""},
 		{"4k 拒绝", spec20, &imagesRequest{Resolution: "4k"}, "resolution"},
-		{"基础版 2k 拒绝", specBase, &imagesRequest{Resolution: "2k"}, "resolution"},
+		// 官方枚举与价目档无关:基础版传 2k 上游照收(平价),必须放行。
+		{"基础版 2k 放行", specBase, &imagesRequest{Resolution: "2k"}, ""},
 		{"mask 拒绝", spec20, &imagesRequest{Mask: "data:image/png;base64,x"}, "mask"},
 		{"两张输入图放行", spec20, &imagesRequest{Images: []string{"https://a", "https://b"}}, ""},
 		{"三张输入图拒绝", spec20, &imagesRequest{Images: []string{"https://a", "https://b", "https://c"}}, "输入图"},
