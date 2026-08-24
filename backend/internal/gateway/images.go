@@ -408,6 +408,7 @@ func readImageRefBytes(ref string, shrinkLimit int) (string, []byte, error) {
 		if err != nil {
 			return "", nil, err
 		}
+		data, _ = sanitizeReferenceImage(data, mimeType)
 		if shrinkLimit > 0 {
 			data, mimeType, err = shrinkImageBytes(data, mimeType, shrinkLimit)
 			if err != nil {
@@ -420,6 +421,7 @@ func readImageRefBytes(ref string, shrinkLimit int) (string, []byte, error) {
 		if err != nil {
 			return "", nil, err
 		}
+		data, _ = sanitizeReferenceImage(data, mimeType)
 		if shrinkLimit > 0 {
 			data, mimeType, err = shrinkImageBytes(data, mimeType, shrinkLimit)
 			if err != nil {
