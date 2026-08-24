@@ -185,6 +185,7 @@ func handleStreamResponseWithKeepAliveOptions(logger *slog.Logger, resp *http.Re
 		dropForClient := false
 		if ok && data != "" && data != "[DONE]" {
 			clientData := normalizeResponsesImageGenerationSSEData(data)
+			clientData = fillZeroedChatStreamUsageMirrors(clientData)
 			if options.suppressChatUsage {
 				clientData, dropForClient = suppressChatStreamUsageForClient(clientData)
 			}
@@ -1039,6 +1040,32 @@ func extractSSEData(line string) (string, bool) {
 
 // parseSSEUsage 把 SSE 事件中的 usage 字段累加到 sdk.Usage。
 // toolImageIn/toolImageOut 可选累加器（响应 tool_usage.image_gen）。
+// fillZeroedChatStreamUsageMirrors 补全上游流式 usage 块里置零的镜像字段。
+// 某些中继（TokenMart grok 通道实测）在 chat completions 流式 usage 里同时
+// 带 Responses 风格的 input_tokens/output_tokens 且恒为 0——标准字段
+// （prompt_tokens/completion_tokens）是对的，但读到镜像字段的客户端会误以为
+// 零消耗。仅当标准字段有值且镜像字段「存在且为 0」时按上游非流式响应的口径
+// 回填（镜像 = 标准字段同值），绝不新增字段；Responses 事件（usage 挂在
+// response 下）与正常 OpenAI 块不满足条件，原样透传。
+func fillZeroedChatStreamUsageMirrors(data string) string {
+	usageNode := gjson.Get(data, "usage")
+	if !usageNode.IsObject() {
+		return data
+	}
+	out := data
+	if prompt := usageNode.Get("prompt_tokens").Int(); prompt > 0 {
+		if mirror := usageNode.Get("input_tokens"); mirror.Exists() && mirror.Int() == 0 {
+			out, _ = sjson.Set(out, "usage.input_tokens", prompt)
+		}
+	}
+	if completion := usageNode.Get("completion_tokens").Int(); completion > 0 {
+		if mirror := usageNode.Get("output_tokens"); mirror.Exists() && mirror.Int() == 0 {
+			out, _ = sjson.Set(out, "usage.output_tokens", completion)
+		}
+	}
+	return out
+}
+
 func parseSSEUsage(data []byte, out *sdk.Usage, toolImageIn, toolImageOut *int) {
 	eventType := gjson.GetBytes(data, "type").String()
 	if response := gjson.GetBytes(data, "response"); response.Exists() {
