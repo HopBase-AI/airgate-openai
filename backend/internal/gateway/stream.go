@@ -613,11 +613,12 @@ func handleNonStreamResponse(resp *http.Response, w http.ResponseWriter, start t
 	}
 
 	elapsed := time.Since(start)
+	bodyModel := gjson.GetBytes(body, "model").String()
 	usage := newTokenUsage(
-		gjson.GetBytes(body, "model").String(),
+		bodyModel,
 		firstNonEmptyTier(reqServiceTier, normalizeOpenAIServiceTier(gjson.GetBytes(body, "service_tier").String())),
 		parsed.inputTokens,
-		parsed.outputTokens,
+		billableOutputTokens(bodyModel, parsed.outputTokens, parsed.reasoningOutputTokens, parsed.chatCompletionStyle),
 		parsed.cachedInputTokens,
 		parsed.reasoningOutputTokens,
 		elapsed.Milliseconds(),
@@ -1088,6 +1089,8 @@ func parseSSEUsage(data []byte, out *sdk.Usage, toolImageIn, toolImageOut *int) 
 		if cachedInputTokens > 0 && inputTokens >= cachedInputTokens {
 			inputTokens -= cachedInputTokens
 		}
+		// chat completions 流式 chunk：grok 口径的 completion_tokens 不含 reasoning，须并入。
+		outputTokens = billableOutputTokens(out.Model, outputTokens, reasoningOutputTokens, true)
 		setUsageTokens(out, inputTokens, outputTokens, cachedInputTokens, reasoningOutputTokens)
 	}
 }
@@ -1153,6 +1156,10 @@ type openaiUsage struct {
 	outputTokens          int
 	cachedInputTokens     int
 	reasoningOutputTokens int
+	// chatCompletionStyle 响应体是 chat completions 口径（object=chat.completion*）。
+	// grok 系上游该口径的 completion_tokens 不含 reasoning，计费时须并入；
+	// Responses 口径（object=response）已含，禁止再并入（见 billableOutputTokens）。
+	chatCompletionStyle bool
 	// image_generation tool 的用量，从 response.tool_usage.image_gen 提取。
 	// 按本次对话模型单价单独归集，便于 Core 对生成图片输出做固定价覆盖。
 	toolImageInputTokens  int
@@ -1163,7 +1170,9 @@ type openaiUsage struct {
 
 // parseUsage 从完整响应体解析 usage
 func parseUsage(body []byte) openaiUsage {
-	usage := openaiUsage{}
+	usage := openaiUsage{
+		chatCompletionStyle: strings.HasPrefix(gjson.GetBytes(body, "object").String(), "chat.completion"),
+	}
 	usageNode := gjson.GetBytes(body, "usage")
 	if !usageNode.Exists() {
 		forEachSSEDataPayload(body, func(data []byte) {
