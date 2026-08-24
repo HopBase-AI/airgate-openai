@@ -26,7 +26,9 @@ import (
 	"unicode"
 
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 
+	"github.com/DouDOU-start/airgate-openai/backend/internal/model"
 	sdk "github.com/DouDOU-start/airgate-sdk/sdkgo"
 )
 
@@ -192,6 +194,7 @@ type imagesRequest struct {
 	Model         string
 	N             int
 	Size          string
+	Resolution    string // xAI Grok Imagine 分辨率档（1k/2k），按张计费模型的计费维度
 	Quality       string
 	Background    string
 	OutputFormat  string
@@ -502,6 +505,7 @@ func parseImagesJSON(body []byte, isEdit bool) (*imagesRequest, error) {
 		Model:         strings.TrimSpace(gjson.GetBytes(body, "model").String()),
 		N:             n,
 		Size:          strings.TrimSpace(gjson.GetBytes(body, "size").String()),
+		Resolution:    strings.TrimSpace(gjson.GetBytes(body, "resolution").String()),
 		Quality:       strings.TrimSpace(gjson.GetBytes(body, "quality").String()),
 		Background:    strings.TrimSpace(gjson.GetBytes(body, "background").String()),
 		OutputFormat:  strings.TrimSpace(gjson.GetBytes(body, "output_format").String()),
@@ -510,24 +514,40 @@ func parseImagesJSON(body []byte, isEdit bool) (*imagesRequest, error) {
 	if !isEdit {
 		return req, nil
 	}
-	// /edits：image 可以是字符串（单图）或字符串数组（多图）
+	// /edits：image 可以是字符串（单图）、字符串数组（多图），或 xAI 风格的
+	// {"url": "..."} 结构（单图 / 数组元素均可），统一归一成引用字符串。
+	imageRefFromNode := func(item gjson.Result) (string, error) {
+		s := strings.TrimSpace(item.String())
+		if item.IsObject() {
+			s = strings.TrimSpace(item.Get("url").String())
+			if s == "" {
+				return "", fmt.Errorf("image 对象缺少 url 字段")
+			}
+		}
+		if s == "" {
+			return "", nil
+		}
+		return normalizeImageRef(s)
+	}
 	imgNode := gjson.GetBytes(body, "image")
 	if imgNode.IsArray() {
 		for _, item := range imgNode.Array() {
-			if s := strings.TrimSpace(item.String()); s != "" {
-				imageRef, err := normalizeImageRef(s)
-				if err != nil {
-					return nil, err
-				}
+			imageRef, err := imageRefFromNode(item)
+			if err != nil {
+				return nil, err
+			}
+			if imageRef != "" {
 				req.Images = append(req.Images, imageRef)
 			}
 		}
-	} else if s := strings.TrimSpace(imgNode.String()); s != "" {
-		imageRef, err := normalizeImageRef(s)
+	} else if imgNode.Exists() {
+		imageRef, err := imageRefFromNode(imgNode)
 		if err != nil {
 			return nil, err
 		}
-		req.Images = append(req.Images, imageRef)
+		if imageRef != "" {
+			req.Images = append(req.Images, imageRef)
+		}
 	}
 	if mask := strings.TrimSpace(gjson.GetBytes(body, "mask").String()); mask != "" {
 		maskRef, err := normalizeImageRef(mask)
@@ -540,6 +560,79 @@ func parseImagesJSON(body []byte, isEdit bool) (*imagesRequest, error) {
 		return nil, fmt.Errorf("/v1/images/edits 需要至少一张 image")
 	}
 	return req, nil
+}
+
+// ─────────────────── xAI Grok Imagine（按张计费模型）请求约束 ───────────────────
+
+// perUnitImagesMaxInputImages 上游实测约束：/v1/images/edits 最多 2 张输入图。
+// 第 3 张起中继侧请求装配损坏（稳定复现 "Cannot set both 'url' and 'file_id'"
+// 且已到 xAI 侧被 400），提前拦截给出清晰错误。
+const perUnitImagesMaxInputImages = 2
+
+// validatePerUnitImagesRequest 校验按张计费模型（xAI Grok Imagine）的请求约束：
+// resolution 只认该模型有官方定价的档位（缺省按 1k 计）；mask 不是该协议语义，
+// 必须明确拒绝不能静默丢弃；编辑输入图张数按上游实测上限拦截。
+func validatePerUnitImagesRequest(spec model.Spec, imgReq *imagesRequest) error {
+	if imgReq == nil {
+		return nil
+	}
+	if res := strings.ToLower(strings.TrimSpace(imgReq.Resolution)); res != "" {
+		if res != "1k" && !(res == "2k" && spec.ImageUnit.TwoK > 0) {
+			supported := "1k"
+			if spec.ImageUnit.TwoK > 0 {
+				supported = "1k / 2k"
+			}
+			return fmt.Errorf("该模型 resolution 仅支持 %s", supported)
+		}
+	}
+	if imgReq.Mask != "" {
+		return fmt.Errorf("该模型不支持 mask 参数")
+	}
+	if len(imgReq.Images) > perUnitImagesMaxInputImages {
+		return fmt.Errorf("该模型 /v1/images/edits 最多支持 %d 张输入图", perUnitImagesMaxInputImages)
+	}
+	return nil
+}
+
+// buildPerUnitImagesEditJSONBody 把 OpenAI 风格 edits 请求改写成 xAI Grok 契约
+// 的 JSON：单图 image = {"url": ...}，多图 image = ["...", ...]（两种形态均为
+// 上游实测通过；对象数组会被上游 422 拒绝）。原请求是 JSON 时只改写 image
+// 字段，保留 resolution / aspect_ratio 等透传参数；multipart 时从解析结果重建
+// （图片已归一成 data URL，上游实测接受 data URL 输入）。
+func buildPerUnitImagesEditJSONBody(body []byte, contentType string, imgReq *imagesRequest) ([]byte, string, error) {
+	if imgReq == nil || len(imgReq.Images) == 0 {
+		return nil, "", fmt.Errorf("/v1/images/edits 需要至少一张 image")
+	}
+	var imageValue any
+	if len(imgReq.Images) == 1 {
+		imageValue = map[string]string{"url": imgReq.Images[0]}
+	} else {
+		imageValue = imgReq.Images
+	}
+	isMultipart := strings.HasPrefix(strings.ToLower(strings.TrimSpace(contentType)), "multipart/")
+	if !isMultipart && len(body) > 0 {
+		patched, err := sjson.SetBytes(body, "image", imageValue)
+		if err != nil {
+			return nil, "", fmt.Errorf("改写 image 字段失败: %w", err)
+		}
+		return patched, "application/json", nil
+	}
+	payload := map[string]any{
+		"model":  imgReq.Model,
+		"prompt": imgReq.Prompt,
+		"image":  imageValue,
+	}
+	if imgReq.N > 1 {
+		payload["n"] = imgReq.N
+	}
+	if imgReq.Resolution != "" {
+		payload["resolution"] = imgReq.Resolution
+	}
+	out, err := json.Marshal(payload)
+	if err != nil {
+		return nil, "", fmt.Errorf("构造 edits 请求体失败: %w", err)
+	}
+	return out, "application/json", nil
 }
 
 func parseImagesEditMultipart(body []byte, contentType string) (*imagesRequest, error) {
@@ -580,6 +673,8 @@ func parseImagesEditMultipart(body []byte, contentType string) (*imagesRequest, 
 			}
 		case "size":
 			req.Size = text
+		case "resolution":
+			req.Resolution = text
 		case "quality":
 			req.Quality = text
 		case "background":
@@ -1683,12 +1778,12 @@ func buildImagesErrorBodyWithCode(status int, code, message string) []byte {
 // 计费字段复用 parseUsage：gpt-image-1 / gpt-image-1.5 返回的
 // usage.input_tokens / usage.output_tokens / usage.input_tokens_details.cached_tokens
 // 与 Responses API 字段同构，parseUsage 已经处理了 cached token 扣减。
-func handleImagesResponse(resp *http.Response, w http.ResponseWriter, sseKA *ssePingKeepAlive, start time.Time, fallbackModel string, billingSize ...string) (sdk.ForwardOutcome, error) {
-	return handleImagesResponseWithLogger(nil, resp, w, sseKA, start, fallbackModel, billingSize...)
+func handleImagesResponse(resp *http.Response, w http.ResponseWriter, sseKA *ssePingKeepAlive, start time.Time, fallbackModel string, imgReq *imagesRequest) (sdk.ForwardOutcome, error) {
+	return handleImagesResponseWithLogger(nil, resp, w, sseKA, start, fallbackModel, imgReq)
 }
 
-func (g *OpenAIGateway) handleImagesResponse(resp *http.Response, w http.ResponseWriter, sseKA *ssePingKeepAlive, start time.Time, fallbackModel string, billingSize ...string) (sdk.ForwardOutcome, error) {
-	return handleImagesResponseWithLogger(g.logger, resp, w, sseKA, start, fallbackModel, billingSize...)
+func (g *OpenAIGateway) handleImagesResponse(resp *http.Response, w http.ResponseWriter, sseKA *ssePingKeepAlive, start time.Time, fallbackModel string, imgReq *imagesRequest) (sdk.ForwardOutcome, error) {
+	return handleImagesResponseWithLogger(g.logger, resp, w, sseKA, start, fallbackModel, imgReq)
 }
 
 // normalizeImagesResponseModelAliases keeps relay-only model IDs out of the
@@ -1714,7 +1809,7 @@ func normalizeImagesResponseModelAliases(body []byte, fallbackModel string) []by
 	return body
 }
 
-func handleImagesResponseWithLogger(logger *slog.Logger, resp *http.Response, w http.ResponseWriter, sseKA *ssePingKeepAlive, start time.Time, fallbackModel string, billingSize ...string) (sdk.ForwardOutcome, error) {
+func handleImagesResponseWithLogger(logger *slog.Logger, resp *http.Response, w http.ResponseWriter, sseKA *ssePingKeepAlive, start time.Time, fallbackModel string, imgReq *imagesRequest) (sdk.ForwardOutcome, error) {
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		reason := fmt.Sprintf("读取 Images 响应失败: %v", err)
@@ -1744,8 +1839,8 @@ func handleImagesResponseWithLogger(logger *slog.Logger, resp *http.Response, w 
 		logger = slog.Default()
 	}
 	billSize := ""
-	if len(billingSize) > 0 {
-		billSize = billingSize[0]
+	if imgReq != nil {
+		billSize = imgReq.Size
 	}
 	// 与 OAuth 路径对齐：优先从响应体获取真实分辨率用于计费。
 	// 优先级：响应 data[0].size → 解码 base64 图片实际宽高 → 请求 size 兜底。
@@ -1772,7 +1867,17 @@ func handleImagesResponseWithLogger(logger *slog.Logger, resp *http.Response, w 
 
 	elapsed := time.Since(start)
 	usage := newTokenUsage(modelName, "", parsed.inputTokens, parsed.outputTokens, parsed.cachedInputTokens, 0, elapsed.Milliseconds())
-	fillUsageCostPerImageBySize(usage, numImages, billSize, "")
+	if spec := model.Lookup(modelName); spec.ImagePerUnitBilling {
+		// xAI Grok Imagine：响应无 token usage，按「张 × resolution 档官方单价」计费。
+		resolution, inputImages := "", 0
+		if imgReq != nil {
+			resolution = imgReq.Resolution
+			inputImages = len(imgReq.Images)
+		}
+		fillUsagePerUnitImageCost(usage, spec, numImages, resolution, inputImages)
+	} else {
+		fillUsageCostPerImageBySize(usage, numImages, billSize, "")
+	}
 
 	if sseKA != nil {
 		if downstreamErr := stopSSEPingKeepAlive(sseKA); downstreamErr != nil {

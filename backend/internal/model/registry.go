@@ -63,6 +63,20 @@ type Spec struct {
 	LongContextInputMultiplier  float64
 	LongContextOutputMultiplier float64
 	LongContextCachedMultiplier float64
+
+	// OutputExcludesReasoning 标记上游 usage 的 completion_tokens 不含
+	// reasoning tokens（xAI Grok 口径，与 OpenAI 相反）。计费时须把
+	// completion_tokens_details.reasoning_tokens 并入输出，否则推理型
+	// 回复的输出费几乎全漏（实测一条回复 completion=1、reasoning=158）。
+	OutputExcludesReasoning bool
+
+	// ImagePerUnitBilling 标记按「张 × 分辨率档」计费的图像模型（xAI Grok
+	// Imagine 口径：响应体没有任何 token usage，只能按张计费）。计费读
+	// ImageUnit 档位单价与 ImageInputUnitPrice，token 价仅作异常兜底。
+	ImagePerUnitBilling bool
+
+	// ImageInputUnitPrice 官方每张输入参考图单价（$/张），仅按张计费模型使用。
+	ImageInputUnitPrice float64
 }
 
 // std 快捷构造 standard / priority / flex 价格齐全的 Spec，
@@ -150,6 +164,38 @@ func withLongCtx(s Spec) Spec {
 	return s
 }
 
+// grokChat 构造 xAI Grok 对话模型的标准价（$/1M tokens，xAI 官方牌价）。
+// 该上游没有 priority/flex 档，不能使用 std() 自动派生不存在的价格。
+// xAI 官方长上下文阶梯：提示 ≥200K tokens 时整笔请求 input/cached/output 全部 ×2
+// （docs.x.ai 2026-08 口径，中继报价与之逐项吻合）。
+// completion_tokens 不含 reasoning tokens，须置 OutputExcludesReasoning。
+func grokChat(name string, ctx int, input, cached, output float64) Spec {
+	return Spec{
+		Name:                        name,
+		ContextWindow:               ctx,
+		InputPrice:                  input,
+		CachedPrice:                 cached,
+		OutputPrice:                 output,
+		LongContextThreshold:        200_000,
+		LongContextInputMultiplier:  2.0,
+		LongContextOutputMultiplier: 2.0,
+		LongContextCachedMultiplier: 2.0,
+		OutputExcludesReasoning:     true,
+	}
+}
+
+// grokImage 构造 xAI Grok Imagine 图像模型（按张计费）。
+// oneK / twoK 为官方每张输出单价（$/张，按 resolution 档），inputPerImage 为
+// 每张输入参考图单价。上游响应没有 token usage，token 价填 GPT Image 兜底值
+// 仅防异常路径漏价，正常计费一律走按张分支。
+func grokImage(name string, oneK, twoK, inputPerImage float64) Spec {
+	s := pricedImageSpec(name, 5.0, 0.5, 30.0)
+	s.ImagePerUnitBilling = true
+	s.ImageUnit = ImageUnitPrice{OneK: oneK, TwoK: twoK}
+	s.ImageInputUnitPrice = inputPerImage
+	return s
+}
+
 // deepSeekFlash 构造 TokenHub DeepSeek V4 Flash 的标准价。
 // 该上游没有 priority/flex 档，不能使用 std() 自动派生不存在的价格。
 func deepSeekFlash(name string) Spec {
@@ -225,6 +271,26 @@ var registry = map[string]Spec{
 	"gemini-3.1-flash-lite-image": withImageUnitPrices(
 		pricedImageSpec("Gemini 3.1 Flash Lite Image", 0.25, 0.025, 30.0), 0.0336, 0, 0),
 
+	// ── xAI Grok（OpenAI 兼容协议，经 TokenMart 中继转发）──
+	// 官方价 2026-08-24 核实（docs.x.ai）：4.20 系 / 4.3 为 $1.25/$2.50，
+	// 4.5 / 4.6 为 $2/$6（缓存读分别 $0.30 / $0.50）；≥200K 整笔 ×2。
+	// 中继实报价 = 官方 × 0.27，逐模型逐档验证吻合；基准价只写官方，采购
+	// 折扣由账号倍率核算。上游 completion_tokens 不含 reasoning（见 grokChat）。
+	"grok-4.20-0309-reasoning":   grokChat("Grok 4.20 Reasoning", 2_000_000, 1.25, 0.20, 2.50),
+	"grok-4.20-multi-agent-0309": grokChat("Grok 4.20 Multi-Agent", 2_000_000, 1.25, 0.20, 2.50),
+	"grok-4.3":                   grokChat("Grok 4.3", 1_000_000, 1.25, 0.20, 2.50),
+	"grok-4.5":                   grokChat("Grok 4.5", 500_000, 2.0, 0.30, 6.0),
+	"grok-4.6":                   grokChat("Grok 4.6", 500_000, 2.0, 0.50, 6.0),
+
+	// ── xAI Grok Imagine 图像（按张计费，$/张官方牌价，响应无 token usage）──
+	// 官方口径：image $0.02/张（输入图 $0.002）；2.0 按 resolution 1k $0.06 /
+	// 2k $0.08；quality 1k $0.05 / 2k $0.07（2.0 与 quality 输入图 $0.01）。
+	// 实测上游 cost_in_usd_ticks（官方 $×1e10）与上表逐档吻合；resolution
+	// 缺省按 1k 计（实测缺省单 6e8 ticks = 1k 档）。
+	"grok-imagine-image":         grokImage("Grok Imagine Image", 0.02, 0, 0.002),
+	"grok-imagine-image-2.0":     grokImage("Grok Imagine Image 2.0", 0.06, 0.08, 0.01),
+	"grok-imagine-image-quality": grokImage("Grok Imagine Image Quality", 0.05, 0.07, 0.01),
+
 	// ── DeepSeek（OpenAI 兼容协议，经 TokenHub 转发）──
 	// TokenHub 实际基础价（每 1M tokens）为 ¥1 / ¥0.2 / ¥2；按项目固定汇率
 	// ¥6.8/$ 换算为精确美元值。生产分组的 5.644 倍（83 折）由 Core 配置，
@@ -297,6 +363,13 @@ func fallbackByKeyword(id string, reg map[string]Spec) (Spec, bool) {
 	switch {
 	case strings.Contains(id, "deepseek"):
 		return reg["deepseek-v4-flash-202605"], true
+	// grok 必须先于 "image" 关键字判：未注册的 grok-imagine 变体掉进 gpt-image
+	// token 价会因响应无 token usage 变成免费流量；未注册 grok 对话模型掉进
+	// GPT 兜底价会丢 OutputExcludesReasoning，推理输出几乎全漏计费。
+	case strings.Contains(id, "grok") && strings.Contains(id, "imagine"):
+		return reg["grok-imagine-image-2.0"], true
+	case strings.Contains(id, "grok"):
+		return reg["grok-4.6"], true
 	case strings.Contains(id, "codex"):
 		return reg["gpt-5.4"], true
 	case strings.Contains(id, "image"):
@@ -413,6 +486,8 @@ func vendorForModel(id string) string {
 		return "google"
 	case strings.HasPrefix(id, "glm"):
 		return "zhipu"
+	case strings.HasPrefix(id, "grok"):
+		return "xai"
 	case strings.HasPrefix(id, "deepseek"):
 		return "deepseek"
 	default:
@@ -433,6 +508,10 @@ func seriesForModel(id string) string {
 		return "gemini-image"
 	case strings.HasPrefix(id, "deepseek-v4"):
 		return "deepseek-v4"
+	case strings.HasPrefix(id, "grok-imagine-image"):
+		return "grok-imagine-image"
+	case strings.HasPrefix(id, "grok-4"):
+		return "grok-4"
 	default:
 		return ""
 	}
@@ -466,6 +545,8 @@ func priceMetadata(spec Spec, meta map[string]string) map[string]string {
 	for _, tier := range spec.ImageUnit.Tiers() {
 		put("price.image."+tier.Tier, tier.Price)
 	}
+	// 按张计费模型的每张输入参考图官方单价（纯展示；计费走 gateway 按张分支）。
+	put("price.image_input", spec.ImageInputUnitPrice)
 	if spec.LongContextThreshold > 0 {
 		meta["long_context.threshold"] = strconv.Itoa(spec.LongContextThreshold)
 		put("long_context.input_multiplier", spec.LongContextInputMultiplier)

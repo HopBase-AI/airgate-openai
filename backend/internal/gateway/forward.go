@@ -269,9 +269,9 @@ func (g *OpenAIGateway) forwardAPIKey(ctx context.Context, req *sdk.ForwardReque
 		// 中继会静默丢弃 video_url 分段导致模型幻觉，统一改写成实测可用的 image_url。
 		req.Body = normalizeGeminiVideoParts(req.Body)
 	}
-	imagesBillingSize := ""
 	imagesPublicModel := ""
 	imagesUpstreamModel := ""
+	imagesPerUnitBilling := false
 	var parsedImages *imagesRequest
 	if isImagesRequest(reqPath) && len(req.Body) > 0 {
 		var err error
@@ -302,7 +302,24 @@ func (g *OpenAIGateway) forwardAPIKey(ctx context.Context, req *sdk.ForwardReque
 				Duration: time.Since(start),
 			}, nil
 		}
-		imagesBillingSize = parsedImages.Size
+		// 按张计费模型（xAI Grok Imagine）：档位 / mask / 输入图上限的前置校验。
+		imagesSpec := model.Lookup(firstNonEmptyString(parsedImages.Model, req.Model))
+		if imagesSpec.ImagePerUnitBilling {
+			imagesPerUnitBilling = true
+			if err := validatePerUnitImagesRequest(imagesSpec, parsedImages); err != nil {
+				errBody := jsonError(err.Error())
+				return sdk.ForwardOutcome{
+					Kind: sdk.OutcomeClientError,
+					Upstream: sdk.UpstreamResponse{
+						StatusCode: http.StatusBadRequest,
+						Headers:    http.Header{"Content-Type": []string{"application/json"}},
+						Body:       errBody,
+					},
+					Reason:   err.Error(),
+					Duration: time.Since(start),
+				}, nil
+			}
+		}
 	}
 	if isImagesRequest(reqPath) {
 		bridgeModel := req.Model
@@ -319,7 +336,26 @@ func (g *OpenAIGateway) forwardAPIKey(ctx context.Context, req *sdk.ForwardReque
 			imagesUpstreamModel = imageUpstreamModelIDForAccount(account, imagesPublicModel)
 		}
 	}
-	if isImagesEditRequest(reqPath) && len(req.Body) > 0 && !strings.HasPrefix(strings.ToLower(req.Headers.Get("Content-Type")), "multipart/") {
+	if isImagesEditRequest(reqPath) && imagesPerUnitBilling && len(req.Body) > 0 {
+		// xAI Grok Imagine 的 edits 契约是 JSON（image = {"url":...} / 字符串数组），
+		// 不能走 OpenAI 多部分表单转换；multipart 客户端请求也统一桥接成 JSON。
+		body, contentType, err := buildPerUnitImagesEditJSONBody(req.Body, req.Headers.Get("Content-Type"), parsedImages)
+		if err != nil {
+			errBody := jsonError(err.Error())
+			return sdk.ForwardOutcome{
+				Kind: sdk.OutcomeClientError,
+				Upstream: sdk.UpstreamResponse{
+					StatusCode: http.StatusBadRequest,
+					Headers:    http.Header{"Content-Type": []string{"application/json"}},
+					Body:       errBody,
+				},
+				Reason:   err.Error(),
+				Duration: time.Since(start),
+			}, nil
+		}
+		req.Body = body
+		req.Headers.Set("Content-Type", contentType)
+	} else if isImagesEditRequest(reqPath) && len(req.Body) > 0 && !strings.HasPrefix(strings.ToLower(req.Headers.Get("Content-Type")), "multipart/") {
 		body, contentType, err := buildAPIKeyImagesEditMultipartBody(req.Body, req.Headers.Get("Content-Type"))
 		if err != nil {
 			errBody := jsonError(err.Error())
@@ -421,7 +457,7 @@ func (g *OpenAIGateway) forwardAPIKey(ctx context.Context, req *sdk.ForwardReque
 					Header:     http.Header{"Content-Type": []string{"application/json"}},
 					Body:       io.NopCloser(bytes.NewReader(finalBody)),
 				}
-				return g.handleImagesResponse(mockResp, req.Writer, nil, start, req.Model, imagesBillingSize)
+				return g.handleImagesResponse(mockResp, req.Writer, nil, start, req.Model, parsedImages)
 			}
 			reason := fmt.Sprintf("上游异步任务恢复失败: %v", pollErr)
 			logger.Warn("images_async_task_recovery_failed",
@@ -577,7 +613,7 @@ func (g *OpenAIGateway) forwardAPIKey(ctx context.Context, req *sdk.ForwardReque
 			body = finalBody
 		}
 		resp.Body = io.NopCloser(bytes.NewReader(body))
-		return g.handleImagesResponse(resp, req.Writer, sseKA, start, req.Model, imagesBillingSize)
+		return g.handleImagesResponse(resp, req.Writer, sseKA, start, req.Model, parsedImages)
 	}
 
 	if req.Stream && req.Writer != nil {

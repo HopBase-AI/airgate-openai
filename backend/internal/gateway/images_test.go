@@ -227,7 +227,7 @@ func TestHandleImagesResponse_TokenAttribution(t *testing.T) {
 	}
 	w := httptest.NewRecorder()
 
-	outcome, err := handleImagesResponse(resp, w, nil, time.Now(), "gpt-image-1.5", "2048x2048")
+	outcome, err := handleImagesResponse(resp, w, nil, time.Now(), "gpt-image-1.5", &imagesRequest{Size: "2048x2048"})
 	if err != nil {
 		t.Fatalf("handleImagesResponse returned err: %v", err)
 	}
@@ -355,7 +355,7 @@ func TestHandleImagesResponseStreamWriteFailureIsNeutralAndKeepsUsage(t *testing
 	w := newFailingResponseWriter(1)
 	sseKA := startSSEPingKeepAlive(w)
 
-	outcome, err := handleImagesResponse(resp, w, sseKA, time.Now(), "gpt-image-1")
+	outcome, err := handleImagesResponse(resp, w, sseKA, time.Now(), "gpt-image-1", nil)
 	if err != nil {
 		t.Fatalf("Core-facing error = %v, want nil", err)
 	}
@@ -380,7 +380,7 @@ func TestHandleImagesResponse_StreamWrapsRESTJSONAsSSE(t *testing.T) {
 	w := httptest.NewRecorder()
 	sseKA := startSSEPingKeepAlive(w)
 
-	outcome, err := handleImagesResponse(resp, w, sseKA, time.Now(), "gpt-image-1")
+	outcome, err := handleImagesResponse(resp, w, sseKA, time.Now(), "gpt-image-1", nil)
 	if err != nil {
 		t.Fatalf("handleImagesResponse returned err: %v", err)
 	}
@@ -414,7 +414,7 @@ func TestHandleImagesResponse_APIKeyBillingUsesRequestSize(t *testing.T) {
 		Body:       ioNopCloserFromString(body),
 	}
 
-	outcome, err := handleImagesResponse(resp, nil, nil, time.Now(), "gpt-image-1.5", "3840x2160")
+	outcome, err := handleImagesResponse(resp, nil, nil, time.Now(), "gpt-image-1.5", &imagesRequest{Size: "3840x2160"})
 	if err != nil {
 		t.Fatalf("handleImagesResponse returned err: %v", err)
 	}
@@ -444,7 +444,7 @@ func TestHandleImagesResponse_NonStreamReturnsBodyWithoutWriter(t *testing.T) {
 		Body:       ioNopCloserFromString(body),
 	}
 
-	outcome, err := handleImagesResponse(resp, nil, nil, time.Now(), "gpt-image-1")
+	outcome, err := handleImagesResponse(resp, nil, nil, time.Now(), "gpt-image-1", nil)
 	if err != nil {
 		t.Fatalf("handleImagesResponse returned err: %v", err)
 	}
@@ -466,7 +466,7 @@ func TestHandleImagesResponse_FallbackModelWhenBodyLacksModel(t *testing.T) {
 		Body:       ioNopCloserFromString(body),
 	}
 
-	outcome, err := handleImagesResponse(resp, nil, nil, time.Now(), "gpt-image-1")
+	outcome, err := handleImagesResponse(resp, nil, nil, time.Now(), "gpt-image-1", nil)
 	if err != nil {
 		t.Fatalf("handleImagesResponse returned err: %v", err)
 	}

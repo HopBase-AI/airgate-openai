@@ -154,7 +154,7 @@ func (g *OpenAIGateway) forwardAPIKeyImagesViaResponsesTool(ctx context.Context,
 		Header:     http.Header{"Content-Type": []string{"application/json"}},
 		Body:       io.NopCloser(bytes.NewReader(restBody)),
 	}
-	return g.handleImagesResponse(mockResp, req.Writer, nil, start, req.Model, imgReq.Size)
+	return g.handleImagesResponse(mockResp, req.Writer, nil, start, req.Model, imgReq)
 }
 
 func apiKeyImageToolChatModel(requestModel string) string {
