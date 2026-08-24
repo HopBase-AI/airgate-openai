@@ -283,17 +283,23 @@ func setUsageImageSize(usage *sdk.Usage, size string) {
 	})
 }
 
+// billableOutputTokens 处理 xAI Grok 上游两种接口的 usage 口径差（均实测锚定）：
+// chat completions 的 completion_tokens **不含** reasoning tokens（实测
+// completion=1 / reasoning=158 而官方按 159 计输出费），须并入；Responses 的
+// output_tokens **已含** reasoning（实测 output=1085 含 reasoning=1071，官方
+// cost ticks 精确按 1085 计），再并入会把推理费双算。chatStyle 由响应体自
+// 描述判定（object=chat.completion*），不能按字段名猜——grok 的 chat 响应里
+// 同时带 input_tokens/output_tokens 镜像字段。
+func billableOutputTokens(modelID string, outputTokens, reasoningTokens int, chatStyle bool) int {
+	if chatStyle && reasoningTokens > 0 && model.Lookup(modelID).OutputExcludesReasoning {
+		return outputTokens + reasoningTokens
+	}
+	return outputTokens
+}
+
 func setUsageTokens(usage *sdk.Usage, inputTokens, outputTokens, cachedInputTokens, reasoningOutputTokens int) {
 	if usage == nil {
 		return
-	}
-	// xAI Grok 口径：上游 completion_tokens 不含 reasoning tokens（与 OpenAI 相反，
-	// 实测 completion=1 / reasoning=158 而官方按 159 计输出费）。对声明了
-	// OutputExcludesReasoning 的模型把推理 token 并入计费输出。SSE 与非流式
-	// 两条路径调用本函数前 usage.Model 均已就位；重复调用是按 key 替换语义，
-	// 每次都从上游原始值重算，不会累加。
-	if reasoningOutputTokens > 0 && model.Lookup(usage.Model).OutputExcludesReasoning {
-		outputTokens += reasoningOutputTokens
 	}
 	setUsageMetric(usage, sdk.UsageMetric{
 		Key:   usageMetricInputTokens,

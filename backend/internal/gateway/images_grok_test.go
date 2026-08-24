@@ -11,24 +11,58 @@ import (
 	"github.com/DouDOU-start/airgate-openai/backend/internal/model"
 )
 
-// TestSetUsageTokensGrokReasoning grok 上游 completion_tokens 不含 reasoning
-// tokens，计费输出必须并入；OpenAI 系模型保持原样。
-func TestSetUsageTokensGrokReasoning(t *testing.T) {
+// TestBillableOutputTokensGrokReasoning grok 两种接口的 usage 口径差（均实测）：
+// chat completions 的 completion_tokens 不含 reasoning（须并入）；Responses 的
+// output_tokens 已含（并入即双算）；OpenAI 系模型两种口径都保持原样。
+func TestBillableOutputTokensGrokReasoning(t *testing.T) {
 	cases := []struct {
-		model      string
-		wantOutput int
+		name      string
+		model     string
+		chatStyle bool
+		output    int
+		reasoning int
+		want      int
 	}{
-		{"grok-4.3", 159}, // 1 completion + 158 reasoning（实测形态）
-		{"gpt-5.4", 1},    // OpenAI 口径 completion 已含 reasoning，不得重复加
+		{"grok chat 并入", "grok-4.3", true, 1, 158, 159},
+		{"grok responses 不并入", "grok-4.20-multi-agent-0309", false, 1085, 1071, 1085},
+		{"gpt chat 不并入", "gpt-5.4", true, 100, 60, 100},
+		{"gpt responses 不并入", "gpt-5.4", false, 100, 60, 100},
 	}
 	for _, tc := range cases {
-		usage := newTokenUsage(tc.model, "", 2, 1, 192, 158, 0)
-		if got := usageMetricInt(usage, usageMetricOutputTokens); got != tc.wantOutput {
-			t.Fatalf("%s 输出 token = %d, want %d", tc.model, got, tc.wantOutput)
-		}
-		if got := usageMetricInt(usage, usageMetricReasoningOutputTokens); got != 158 {
-			t.Fatalf("%s 推理 token 指标 = %d, want 158", tc.model, got)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			if got := billableOutputTokens(tc.model, tc.output, tc.reasoning, tc.chatStyle); got != tc.want {
+				t.Fatalf("billableOutputTokens = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestParseUsageChatCompletionStyle 口径判定必须来自响应体 object 自描述——grok
+// 的 chat 响应同时带 input_tokens/output_tokens 镜像字段，按字段名猜会判错。
+func TestParseUsageChatCompletionStyle(t *testing.T) {
+	chatBody := `{"object":"chat.completion","model":"grok-4.3","usage":{"prompt_tokens":194,"completion_tokens":1,"input_tokens":194,"output_tokens":1,"prompt_tokens_details":{"cached_tokens":192},"completion_tokens_details":{"reasoning_tokens":138}}}`
+	parsed := parseUsage([]byte(chatBody))
+	if !parsed.chatCompletionStyle {
+		t.Fatal("chat.completion 响应应判为 chat 口径")
+	}
+	if parsed.outputTokens != 1 || parsed.reasoningOutputTokens != 138 {
+		t.Fatalf("chat 解析 output=%d reasoning=%d", parsed.outputTokens, parsed.reasoningOutputTokens)
+	}
+
+	responsesBody := `{"object":"response","model":"grok-4.20-multi-agent-0309","usage":{"input_tokens":2663,"output_tokens":1085,"input_tokens_details":{"cached_tokens":2560},"output_tokens_details":{"reasoning_tokens":1071}}}`
+	parsed = parseUsage([]byte(responsesBody))
+	if parsed.chatCompletionStyle {
+		t.Fatal("Responses 响应不得判为 chat 口径")
+	}
+	if parsed.outputTokens != 1085 || parsed.reasoningOutputTokens != 1071 {
+		t.Fatalf("responses 解析 output=%d reasoning=%d", parsed.outputTokens, parsed.reasoningOutputTokens)
+	}
+	// 端到端口径：chat 并入、responses 保持。
+	if got := billableOutputTokens("grok-4.3", 1, 138, true); got != 139 {
+		t.Fatalf("chat 口径 billable = %d, want 139", got)
+	}
+	if got := billableOutputTokens("grok-4.20-multi-agent-0309", parsed.outputTokens, parsed.reasoningOutputTokens, parsed.chatCompletionStyle); got != 1085 {
+		t.Fatalf("responses 口径 billable = %d, want 1085", got)
 	}
 }
 
