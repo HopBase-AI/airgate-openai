@@ -408,7 +408,7 @@ func readImageRefBytes(ref string, shrinkLimit int) (string, []byte, error) {
 		if err != nil {
 			return "", nil, err
 		}
-		data, _ = sanitizeReferenceImage(data, mimeType)
+		data, mimeType, _ = normalizeReferenceImage(data, mimeType)
 		if shrinkLimit > 0 {
 			data, mimeType, err = shrinkImageBytes(data, mimeType, shrinkLimit)
 			if err != nil {
@@ -421,7 +421,7 @@ func readImageRefBytes(ref string, shrinkLimit int) (string, []byte, error) {
 		if err != nil {
 			return "", nil, err
 		}
-		data, _ = sanitizeReferenceImage(data, mimeType)
+		data, mimeType, _ = normalizeReferenceImage(data, mimeType)
 		if shrinkLimit > 0 {
 			data, mimeType, err = shrinkImageBytes(data, mimeType, shrinkLimit)
 			if err != nil {
@@ -1956,6 +1956,10 @@ func (g *OpenAIGateway) pollAsyncImageTask(
 	taskID string,
 	logger *slog.Logger,
 ) ([]byte, error) {
+	// MiniMax X-Async 契约（顶层 task_id / content/images/tasks 查询）走专用轮询。
+	if imagesAsyncEnabled(account) {
+		return g.pollMiniMaxImageTask(ctx, account, taskID, logger)
+	}
 	baseURL := strings.TrimRight(account.Credentials["base_url"], "/")
 	if baseURL == "" {
 		baseURL = "https://api.openai.com"

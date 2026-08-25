@@ -372,6 +372,14 @@ func (g *OpenAIGateway) forwardAPIKey(ctx context.Context, req *sdk.ForwardReque
 		}
 		req.Body = body
 		req.Headers.Set("Content-Type", contentType)
+	} else if isImagesEditRequest(reqPath) && len(req.Body) > 0 && strings.HasPrefix(strings.ToLower(req.Headers.Get("Content-Type")), "multipart/") {
+		// 客户端直传 multipart：参考图同样过归一化（相机 JPEG 元数据兼容问题
+		// 与 JSON 引用图路径一致），失败时原样透传交上游判。
+		if body, changed, err := normalizeImagesEditMultipartBody(req.Body, req.Headers.Get("Content-Type")); err != nil {
+			logger.Warn("images_edit_multipart_normalize_failed", sdk.LogFieldError, err)
+		} else if changed {
+			req.Body = body
+		}
 	} else if isImagesRequest(reqPath) && len(req.Body) > 0 && !strings.HasPrefix(strings.ToLower(req.Headers.Get("Content-Type")), "multipart/") {
 		if patched, err := sjson.DeleteBytes(req.Body, "stream"); err == nil {
 			req.Body = patched
@@ -443,6 +451,14 @@ func (g *OpenAIGateway) forwardAPIKey(ctx context.Context, req *sdk.ForwardReque
 	}
 	passHeadersForAccount(req.Headers, upstreamReq.Header, account)
 
+	// 图像异步任务模式（MiniMax canvas-20 契约）：提交时带 X-Async，上游校验
+	// 通过即返回 task_id，实际生成经 pollMiniMaxImageTask 轮询取回——不再有
+	// 一条上游 HTTP 挂到 300s 硬超时的形态。
+	if imagesAsyncEnabled(account) && isImagesRequest(reqPath) && methodAllowsBody(reqMethod) {
+		upstreamReq.Header.Set("X-Async", "true")
+		upstreamReq.Header.Set("X-Timeout", strconv.Itoa(miniMaxAsyncTimeoutSeconds))
+	}
+
 	// 重启恢复：有上游异步 task_id 的 images 请求直接 poll，不再重复发起上游请求
 	if isImagesRequest(reqPath) {
 		if recoveryID := req.Headers.Get(upstreamTaskIDHeader); recoveryID != "" {
@@ -464,6 +480,14 @@ func (g *OpenAIGateway) forwardAPIKey(ctx context.Context, req *sdk.ForwardReque
 				"upstream_task_id", recoveryID,
 				sdk.LogFieldError, pollErr,
 			)
+			var taskFailed *asyncImageTaskFailedError
+			if errors.As(pollErr, &taskFailed) {
+				outcome := failureOutcome(taskFailed.StatusCode, taskFailed.Body,
+					http.Header{"Content-Type": []string{"application/json"}},
+					truncate(string(taskFailed.Body), 200), 0)
+				outcome.Duration = time.Since(start)
+				return outcome, nil
+			}
 			return transientOutcome(reason), fmt.Errorf("%s", reason)
 		}
 	}
@@ -579,7 +603,12 @@ func (g *OpenAIGateway) forwardAPIKey(ctx context.Context, req *sdk.ForwardReque
 			return transientOutcome(reason), fmt.Errorf("%s", reason)
 		}
 
-		if taskID, ok := isAsyncImageTaskResponse(body); ok {
+		taskID, isAsyncTask := isAsyncImageTaskResponse(body)
+		if !isAsyncTask && imagesAsyncEnabled(account) {
+			// MiniMax X-Async 提交响应：顶层 task_id（仅在显式启用的账号上识别）。
+			taskID, isAsyncTask = miniMaxAsyncTaskID(body)
+		}
+		if isAsyncTask {
 			logger.Debug("images_async_task_detected",
 				sdk.LogFieldAccountID, account.ID,
 				sdk.LogFieldModel, req.Model,
@@ -607,6 +636,16 @@ func (g *OpenAIGateway) forwardAPIKey(ctx context.Context, req *sdk.ForwardReque
 					if downstreamErr := stopSSEPingKeepAlive(sseKA); downstreamErr != nil {
 						return streamAbortedOutcome(downstreamErr, nil, time.Since(start)), nil
 					}
+				}
+				// 任务终态失败：按同步失败同一套分类（400 判客户端错等），
+				// 不判 transient——重试会重新提交并计费一个新任务。
+				var taskFailed *asyncImageTaskFailedError
+				if errors.As(pollErr, &taskFailed) {
+					outcome := failureOutcome(taskFailed.StatusCode, taskFailed.Body,
+						http.Header{"Content-Type": []string{"application/json"}},
+						truncate(string(taskFailed.Body), 200), 0)
+					outcome.Duration = time.Since(start)
+					return outcome, nil
 				}
 				return transientOutcome(reason), fmt.Errorf("%s", reason)
 			}
