@@ -23,6 +23,18 @@
   ⚠️ 前提：放宽后的规则是按 **OpenAI 官方**写的，但 `gpt-image-2` 实际上游可能不是 OpenAI
   （2026-08-24 生产上是 `api.minimax.io` 的 `canvas-20`，实测口径一致）。
   **换上游时必须重验这个口径**，否则会变成「我们放行、上游拒绝」，错误延后到上游侧暴露。
+- **edits 参考图必须过归一化**（`image_normalize.go`，2026-08-25）：相机直出 JPEG 的
+  EXIF 色彩元数据（bt470bg 等）会让 MiniMax 上游**概率性** 400/挂死——同一份字节
+  实测 3 挂 1 成，单次成败都证明不了什么。归一化 = 解码→按 Orientation 旋转像素→
+  长边 >2048 降采样→重编码无元数据 JPEG；JSON 引用图（`readImageRefBytes`）与
+  客户端 multipart 直传两条路都要挂，只挂一条会在客户换 SDK 时复发。
+  容器级 MPF 净化（`image_container.go`）只是解码失败时的降级兜底。
+- **MiniMax 图像异步任务**（`images_async_minimax.go`）：账号凭证 `images_async=true`
+  时提交带 `X-Async` 头、按 `/v1/content/images/tasks/{id}` 轮询（契约见
+  `docs/minimax-canvas20-images-async-api.md`）。提交接口**没有幂等键**：轮询失败
+  只能重试查询、绝不能重新提交（会创建并计费新任务）；任务终态失败必须走
+  `asyncImageTaskFailedError` 按同步失败分类，不能判 transient（transient 会触发
+  failover 重新提交）。
 
 ## 混合现状（过渡态）
 
