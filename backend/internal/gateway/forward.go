@@ -421,6 +421,30 @@ func (g *OpenAIGateway) forwardAPIKey(ctx context.Context, req *sdk.ForwardReque
 		)
 	}
 
+	// 账号级「公开模型名 → 上游模型 ID」映射：同一模型在不同上游 ID 未必一致
+	// （如 DeepSeek V4 Pro 在腾讯 TokenHub 叫 deepseek-v4-pro-202606，在火山方舟叫
+	// deepseek-v4-pro-ga-260813）。只重写发往上游的 body，计费与用量仍走公开名。
+	if !isImagesRequest(reqPath) && len(req.Body) > 0 {
+		publicChatModel := firstNonEmptyString(req.Model, gjson.GetBytes(req.Body, "model").String())
+		if upstreamChatModel := chatUpstreamModelForAccount(account, publicChatModel); upstreamChatModel != "" {
+			rewritten, err := rewriteChatRequestModel(req.Body, upstreamChatModel)
+			if err == nil {
+				req.Body = rewritten
+				logger.Info("chat_upstream_model_resolved",
+					"public_model", publicChatModel,
+					"upstream_model", upstreamChatModel,
+					"path", reqPath,
+				)
+			} else {
+				logger.Warn("chat_upstream_model_rewrite_failed",
+					"public_model", publicChatModel,
+					"upstream_model", upstreamChatModel,
+					"error", err,
+				)
+			}
+		}
+	}
+
 	var bodyReader io.Reader
 	if methodAllowsBody(reqMethod) && len(req.Body) > 0 {
 		bodyReader = bytes.NewReader(req.Body)

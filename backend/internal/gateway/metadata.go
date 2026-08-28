@@ -67,6 +67,7 @@ func BuildPluginInfo() sdk.PluginInfo {
 					{Key: imagesPathPrefixCredential, Label: "图像端点路径前缀", Type: "text", Required: false, Placeholder: "可选；非标图像中转的路径前缀，生成/编辑分别拼 /generations、/edits，例如 /v1/content/models/canvas-20"},
 					{Key: imagesAsyncCredential, Label: "图像异步任务模式", Type: "text", Required: false, Placeholder: "可选；填 true 时图像请求走 X-Async 提交 + 任务轮询（MiniMax canvas-20 契约）"},
 					{Key: geminiImageProtocolCredential, Label: "Gemini 生图协议", Type: "text", Required: false, Placeholder: "默认 chat_completions；纯 Images API 上游填 images_api"},
+					{Key: chatModelMapCredential, Label: "对话模型 ID 映射", Type: "text", Required: false, Placeholder: `可选；JSON 对象，公开模型名→该上游真实 ID，例如 {"deepseek-v4-pro-202606":"deepseek-v4-pro-ga-260813"}`},
 				},
 			},
 			{

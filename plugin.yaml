@@ -571,6 +571,11 @@ gateway:
           type: text
           required: false
           placeholder: 默认 chat_completions；纯 Images API 上游填 images_api
+        - key: chat_model_map
+          label: 对话模型 ID 映射
+          type: text
+          required: false
+          placeholder: 可选；JSON 对象，公开模型名→该上游真实 ID，例如 {"deepseek-v4-pro-202606":"deepseek-v4-pro-ga-260813"}
     - key: oauth
       label: OAuth 登录
       description: 通过浏览器授权登录 ChatGPT 账号
