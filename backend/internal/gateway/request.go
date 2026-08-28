@@ -198,7 +198,12 @@ func buildAPIKeyURL(account *sdk.Account, reqPath string) string {
 		reqPath = "/v1/responses"
 	}
 
-	if strings.HasSuffix(baseURL, "/v1") {
+	// base_url 自带路径时，视为调用方已给出完整 API 前缀，去掉请求路径里的 /v1
+	// 再拼接。这既覆盖了 ".../v1" 这类 OpenAI 兼容地址，也支持前缀本身不叫 v1 的
+	// 上游——例如火山方舟是 https://ark.cn-beijing.volces.com/api/v3，若原样拼上
+	// /v1/chat/completions 会得到 /api/v3/v1/chat/completions 而 404。
+	// base_url 只有域名（无路径）时保持原样，仍拼完整的 /v1/... 标准路径。
+	if u, err := url.Parse(baseURL); err == nil && strings.Trim(u.Path, "/") != "" {
 		return baseURL + strings.TrimPrefix(reqPath, "/v1")
 	}
 	return baseURL + reqPath
