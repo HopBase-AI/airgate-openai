@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"encoding/json"
+	"log/slog"
 	"strings"
 
 	sdk "github.com/DouDOU-start/airgate-sdk/sdkgo"
@@ -60,4 +61,32 @@ func rewriteChatRequestModel(body []byte, upstreamModel string) ([]byte, error) 
 		return body, nil
 	}
 	return sjson.SetBytes(body, "model", upstreamModel)
+}
+
+// restoreMappedUsageModel 把 Usage.Model 从上游 ID 还原为公开模型名，并按公开名重算成本。
+//
+// 做过 chat_model_map 映射时，上游按自己的 ID 回包，而 Usage.Model 取自响应体。
+// 上游 ID 不在我方价格表里，model.Lookup 会走关键字兜底匹配到别的型号——实测
+// deepseek-v4-pro-ga-260813 被按 DeepSeek Flash 计价，Pro 少收 3 倍，且 usage_logs
+// 的 model 列记成上游 ID 导致对账与用量统计一并失真。
+//
+// 未发生映射（mappedPublicModel 为空）时完全不介入，保持既有行为。
+func restoreMappedUsageModel(logger *slog.Logger, outcome *sdk.ForwardOutcome, mappedPublicModel string) {
+	if mappedPublicModel == "" || outcome == nil || outcome.Usage == nil {
+		return
+	}
+	upstreamModel := outcome.Usage.Model
+	if upstreamModel == mappedPublicModel {
+		return
+	}
+	outcome.Usage.Model = mappedPublicModel
+	setUsageModelAttribute(outcome.Usage, mappedPublicModel)
+	// 成本此前是按上游 ID 查表算出来的，必须按公开名整体重算覆盖。
+	fillUsageCost(outcome.Usage)
+	if logger != nil {
+		logger.Info("chat_usage_model_restored",
+			"upstream_model", upstreamModel,
+			"public_model", mappedPublicModel,
+		)
+	}
 }
