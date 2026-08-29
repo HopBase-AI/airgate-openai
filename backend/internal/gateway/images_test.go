@@ -1126,15 +1126,16 @@ func TestImageTaskBuildInputKeepsOpenAICompatibleGeminiModelAndSize(t *testing.T
 }
 
 func TestImageTaskBuildInputRejectsUnsupportedGeminiLiteSize(t *testing.T) {
+	// WxH 永不拒绝(就近吸附官方档位);显式点名超出模型能力的档位才 400。
 	_, _, err := imageGenerateHandler{}.BuildInput(&sdk.ForwardRequest{
 		Model:   "gemini-3.1-flash-lite-image",
-		Body:    []byte(`{"prompt":"a product hero","size":"2048x2048"}`),
+		Body:    []byte(`{"prompt":"a product hero","size":"2K"}`),
 		Headers: http.Header{},
 	}, "/v1/images/generations")
 	if err == nil {
-		t.Fatal("expected unsupported size error")
+		t.Fatal("expected unsupported tier error")
 	}
-	if !strings.Contains(err.Error(), "gemini-3.1-flash-lite-image") || !strings.Contains(err.Error(), "2048x2048") {
+	if !strings.Contains(err.Error(), "gemini-3.1-flash-lite-image") || !strings.Contains(err.Error(), "2K") {
 		t.Fatalf("error = %v", err)
 	}
 }
@@ -1148,9 +1149,11 @@ func TestValidateImageModelSize(t *testing.T) {
 	}{
 		{name: "gpt image 4k", model: "gpt-image-2", size: "3840x2160"},
 		{name: "banana lite 1k", model: "gemini-3.1-flash-lite-image", size: "1024x1536"},
-		{name: "banana lite rejects 2k", model: "gemini-3.1-flash-lite-image", size: "2048x2048", wantErr: true},
-		{name: "banana 2 rejects 4k", model: "gemini-3.1-flash-image", size: "3840x2160", wantErr: true},
-		{name: "banana 2 chat variant rejects 4k", model: "gemini-3.1-flash-image-c", size: "3840x2160", wantErr: true},
+		{name: "banana lite 2k WxH 吸附放行", model: "gemini-3.1-flash-lite-image", size: "2048x2048"},
+		{name: "banana lite 显式 2K 档拒绝", model: "gemini-3.1-flash-lite-image", size: "2K", wantErr: true},
+		{name: "banana 2 4k WxH 吸附放行", model: "gemini-3.1-flash-image", size: "3840x2160"},
+		{name: "banana 2 显式 4K 档拒绝", model: "gemini-3.1-flash-image", size: "4k", wantErr: true},
+		{name: "banana 2 chat variant 显式 4K 档拒绝", model: "gemini-3.1-flash-image-c", size: "4K", wantErr: true},
 		{name: "unknown model passes through", model: "custom-image-model", size: "2048x2048"},
 		{name: "empty size passes through", model: "gemini-3.1-flash-lite-image", size: ""},
 	}
@@ -1185,7 +1188,7 @@ func TestForwardAPIKeyRejectsUnsupportedImageSizeBeforeUpstream(t *testing.T) {
 			"api_key":  "sk-test",
 		}},
 		Model:   "gemini-3.1-flash-lite-image",
-		Body:    []byte(`{"prompt":"a product hero","size":"2048x2048"}`),
+		Body:    []byte(`{"prompt":"a product hero","size":"2K"}`),
 		Headers: headers,
 	}, "")
 	if err != nil {
@@ -1200,7 +1203,7 @@ func TestForwardAPIKeyRejectsUnsupportedImageSizeBeforeUpstream(t *testing.T) {
 	if upstreamCalls != 0 {
 		t.Fatalf("upstreamCalls = %d, want 0", upstreamCalls)
 	}
-	if !strings.Contains(string(outcome.Upstream.Body), "2048x2048") {
+	if !strings.Contains(string(outcome.Upstream.Body), "2K") {
 		t.Fatalf("body = %s", outcome.Upstream.Body)
 	}
 }
@@ -2939,8 +2942,12 @@ func TestGPTImage2FollowsOfficialArbitrarySizeRule(t *testing.T) {
 		}
 	}
 
-	// 枚举白名单仍然管住真的只支持固定档的 Gemini 系,别把这条一起放开。
-	if err := validateImageModelSize("gemini-3.1-flash-lite-image", "1152x864"); err == nil {
-		t.Error("Gemini lite 只支持固定档位,不该跟着 gpt-image-2 放开任意尺寸")
+	// Gemini 系 WxH 也已放开(就近吸附官方比例+档位钳制),但显式点名超出
+	// 模型能力的档位仍要拒——这是 Google 官方定价档位,不是我们自设的限制。
+	if err := validateImageModelSize("gemini-3.1-flash-lite-image", "1152x864"); err != nil {
+		t.Errorf("Gemini lite 的 WxH 应吸附放行: %v", err)
+	}
+	if err := validateImageModelSize("gemini-3.1-flash-lite-image", "4K"); err == nil {
+		t.Error("Gemini lite 显式点名 4K 档应当 400")
 	}
 }
