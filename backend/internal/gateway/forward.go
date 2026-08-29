@@ -430,12 +430,18 @@ func (g *OpenAIGateway) forwardAPIKey(ctx context.Context, req *sdk.ForwardReque
 	// 匹配到别的型号（实测 deepseek-v4-pro-ga-260813 被按 Flash 计价，少收 3 倍），
 	// 与 gpt-5.6 错价事故同类。
 	upstreamBody := req.Body
+	// mappedPublicModel 非空 = 本次做过模型映射。上游会用自己的 ID 回包，
+	// 而计费从响应里取 model；上游 ID 不在我方价格表里，会被关键字兜底匹配到
+	// 别的型号（实测 deepseek-v4-pro-ga-260813 被按 Flash 计价，少收 3 倍）。
+	// 因此拿到 outcome 后必须把 Usage.Model 改回公开名并按公开名重算成本。
+	mappedPublicModel := ""
 	if !isImagesRequest(reqPath) && len(req.Body) > 0 {
 		publicChatModel := firstNonEmptyString(req.Model, gjson.GetBytes(req.Body, "model").String())
 		if upstreamChatModel := chatUpstreamModelForAccount(account, publicChatModel); upstreamChatModel != "" {
 			rewritten, err := rewriteChatRequestModel(req.Body, upstreamChatModel)
 			if err == nil {
 				upstreamBody = rewritten
+				mappedPublicModel = publicChatModel
 				logger.Info("chat_upstream_model_resolved",
 					"public_model", publicChatModel,
 					"upstream_model", upstreamChatModel,
@@ -691,10 +697,12 @@ func (g *OpenAIGateway) forwardAPIKey(ctx context.Context, req *sdk.ForwardReque
 		}
 		outcome, streamErr := handleStreamResponseWithOptions(logger, resp, req.Writer, start, reqServiceTier, options)
 		attachUpstreamTimings(&outcome, pluginPreMs, upstreamTTFBMs)
+		restoreMappedUsageModel(logger, &outcome, mappedPublicModel)
 		return outcome, streamErr
 	}
 	outcome, dispatchErr := handleNonStreamResponse(resp, req.Writer, start, reqServiceTier)
 	attachUpstreamTimings(&outcome, pluginPreMs, upstreamTTFBMs)
+	restoreMappedUsageModel(logger, &outcome, mappedPublicModel)
 	return outcome, dispatchErr
 }
 

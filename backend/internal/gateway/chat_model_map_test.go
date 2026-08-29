@@ -3,6 +3,8 @@ package gateway
 import (
 	"testing"
 
+	"github.com/DouDOU-start/airgate-openai/backend/internal/model"
+
 	sdk "github.com/DouDOU-start/airgate-sdk/sdkgo"
 	"github.com/tidwall/gjson"
 )
@@ -100,4 +102,66 @@ func TestRewriteChatRequestModel_DoesNotMutateOriginalBody(t *testing.T) {
 	if gjson.GetBytes(out, "model").String() != "deepseek-v4-pro-ga-260813" {
 		t.Fatalf("returned body must carry upstream id, got %q", gjson.GetBytes(out, "model").String())
 	}
+}
+
+// 上游按自己的 ID 回包时，Usage.Model 必须还原为公开名，成本按公开名重算。
+// 若不还原：上游 ID 不在价格表，会被兜底匹配到别的型号（线上 Pro 曾被按 Flash 计价）。
+//
+// 用内置注册表里确实存在且价格不同的模型来验证——deepseek-v4-pro-202606 的价格
+// 来自后台模型目录覆盖层，单测环境没有覆盖层，两个名字会兜底到同一价而测不出差异。
+func TestRestoreMappedUsageModel_RestoresPublicNameAndReprices(t *testing.T) {
+	const upstreamID = "vendor-internal-xyz-001" // 不含任何系列关键字 → 落 DefaultSpec
+	const publicName = "deepseek-v4-flash-202605"
+
+	usage := newTokenUsage(upstreamID, "", 1_000_000, 0, 0, 0, 0)
+	fillUsageCost(usage) // 模拟按上游 ID 错算的成本
+	wrongInput := metricAccountCost(usage, usageMetricInputTokens)
+	if want := model.DefaultSpec.InputPrice; wrongInput != want {
+		t.Fatalf("前置条件不成立：未知上游 ID 应落 DefaultSpec %v，实际 %v", want, wrongInput)
+	}
+
+	outcome := &sdk.ForwardOutcome{Kind: sdk.OutcomeSuccess, Usage: usage}
+	restoreMappedUsageModel(nil, outcome, publicName)
+
+	if outcome.Usage.Model != publicName {
+		t.Fatalf("model not restored, got %q", outcome.Usage.Model)
+	}
+	gotInput := metricAccountCost(outcome.Usage, usageMetricInputTokens)
+	wantInput := model.Lookup(publicName).InputPrice // $/1M × 1M token
+	if gotInput != wantInput {
+		t.Fatalf("input cost not repriced: got %v want %v", gotInput, wantInput)
+	}
+	if gotInput == wrongInput {
+		t.Fatalf("cost unchanged — reprice did not happen (%v)", gotInput)
+	}
+}
+
+// 未发生映射时必须完全不介入。
+func TestRestoreMappedUsageModel_NoopWhenNotMapped(t *testing.T) {
+	usage := newTokenUsage("deepseek-v4-flash-202605", "", 100, 100, 0, 0, 0)
+	fillUsageCost(usage)
+	before := metricAccountCost(usage, usageMetricInputTokens)
+
+	outcome := &sdk.ForwardOutcome{Kind: sdk.OutcomeSuccess, Usage: usage}
+	restoreMappedUsageModel(nil, outcome, "")
+
+	if outcome.Usage.Model != "deepseek-v4-flash-202605" {
+		t.Fatalf("model must stay untouched, got %q", outcome.Usage.Model)
+	}
+	if got := metricAccountCost(outcome.Usage, usageMetricInputTokens); got != before {
+		t.Fatalf("cost must stay untouched: got %v want %v", got, before)
+	}
+}
+
+// metricAccountCost 从 Usage.Metrics 取指定指标的 AccountCost，测试辅助。
+func metricAccountCost(usage *sdk.Usage, key string) float64 {
+	if usage == nil {
+		return 0
+	}
+	for _, m := range usage.Metrics {
+		if m.Key == key {
+			return m.AccountCost
+		}
+	}
+	return 0
 }
