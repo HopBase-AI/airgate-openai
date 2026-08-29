@@ -190,7 +190,7 @@ func buildGeminiImageChatRequestBody(modelName string, req *imagesRequest) ([]by
 			"type": "image",
 		},
 	}
-	if imageConfig := geminiImageChatConfig(req); imageConfig != nil {
+	if imageConfig := geminiImageChatConfig(modelName, req); imageConfig != nil {
 		payload["extra_body"] = map[string]any{
 			"google": map[string]any{
 				"image_config": imageConfig,
@@ -200,35 +200,35 @@ func buildGeminiImageChatRequestBody(modelName string, req *imagesRequest) ([]by
 	return json.Marshal(payload)
 }
 
-func geminiImageChatConfig(req *imagesRequest) map[string]string {
+// geminiImageChatConfig 把客户的 size 翻译成 Gemini 的 aspect_ratio + image_size：
+// 显式 1K/2K/4K 字面量按 1:1 直取（越权档位已被 validateImageModelSize 拦下）；
+// 任意 WxH 就近吸附官方比例，档位按长边推导后钳到模型能力上限，永不拒绝。
+// 例：flash（仅 1K 档）收到 1024x1792 → 9:16 + 1K（上游出 768x1344）。
+func geminiImageChatConfig(modelName string, req *imagesRequest) map[string]string {
 	if req == nil {
 		return nil
 	}
 	size := strings.ToLower(strings.TrimSpace(req.Size))
-	var aspectRatio, imageSize string
-	switch size {
-	case "1024x1024":
-		aspectRatio, imageSize = "1:1", "1K"
-	case "1536x1024":
-		aspectRatio, imageSize = "3:2", "1K"
-	case "1024x1536":
-		aspectRatio, imageSize = "2:3", "1K"
-	case "2048x2048":
-		aspectRatio, imageSize = "1:1", "2K"
-	case "2048x1152":
-		aspectRatio, imageSize = "16:9", "2K"
-	case "1152x2048":
-		aspectRatio, imageSize = "9:16", "2K"
-	case "3840x2160":
-		aspectRatio, imageSize = "16:9", "4K"
-	case "2160x3840":
-		aspectRatio, imageSize = "9:16", "4K"
-	default:
+	if size == "" || size == "auto" {
 		return nil
 	}
+	if literal, ok := geminiLiteralTier(size); ok {
+		return map[string]string{
+			"aspect_ratio": "1:1",
+			"image_size":   strings.ToUpper(literal),
+		}
+	}
+	width, height, ok := parseImageSize(size)
+	if !ok || width <= 0 || height <= 0 {
+		return nil
+	}
+	tier := imageTierForSize(size)
+	if maxTier := geminiMaxDeclaredTier(modelName); geminiTierRank(tier) > geminiTierRank(maxTier) {
+		tier = maxTier
+	}
 	return map[string]string{
-		"aspect_ratio": aspectRatio,
-		"image_size":   imageSize,
+		"aspect_ratio": closestGeminiAspectRatio(width, height),
+		"image_size":   strings.ToUpper(tier),
 	}
 }
 
