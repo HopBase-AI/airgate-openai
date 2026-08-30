@@ -145,6 +145,11 @@ func (g *OpenAIGateway) Forward(ctx context.Context, req *sdk.ForwardRequest) (s
 		"proxy_target", redactProxyURL(proxyURL),
 	)
 
+	// chat completions 空/缺 messages 在门口直接 400(见 chat_request_guard.go)。
+	if outcome, rejected := rejectInvalidChatMessages(req, method, path, time.Now()); rejected {
+		return outcome, nil
+	}
+
 	return g.forwardHTTP(ctx, req)
 }
 
