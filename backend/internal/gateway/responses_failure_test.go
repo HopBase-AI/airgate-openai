@@ -679,8 +679,11 @@ func TestHandleStreamResponseTreatsReasoningContentAsOutput(t *testing.T) {
 		t.Fatalf("expected OutcomeSuccess, got %v", outcome.Kind)
 	}
 	got := w.Body.String()
-	if got != body {
-		t.Fatalf("reasoning-only stream should be forwarded unchanged:\n got: %q\nwant: %q", got, body)
+	// [DONE] 后由我们补空行终结最后一个事件帧(终止事件即收尾,不再等上游 EOF),
+	// 上游这份流恰好缺终帧空行,因此期望值比上游原文多一个 "\n"。
+	want := body + "\n"
+	if got != want {
+		t.Fatalf("reasoning-only stream should be forwarded unchanged:\n got: %q\nwant: %q", got, want)
 	}
 }
 
