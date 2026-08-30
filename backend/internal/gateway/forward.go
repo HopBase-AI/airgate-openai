@@ -253,6 +253,10 @@ func (g *OpenAIGateway) forwardAPIKey(ctx context.Context, req *sdk.ForwardReque
 		requestCtx, requestCancel = context.WithCancel(ctx)
 	}
 	defer requestCancel()
+	// Gemini 生图模型的 chat 请求走「无图重试」守卫(上游概率性只回文本不出图)。
+	if isGeminiImageChatRequest(req, reqMethod, reqPath) {
+		return g.forwardAPIKeyGeminiImageChat(ctx, req, reqServiceTier, start)
+	}
 	targetURL := buildAPIKeyURL(account, upstreamImagesPath(account, reqPath))
 	// TokenHub 的 DeepSeek Flash Chat 流只有收到 include_usage 才保证返回计费 token；
 	// 客户端未订阅时，仍向上游请求 usage，但在回包阶段隐藏额外的 usage。
