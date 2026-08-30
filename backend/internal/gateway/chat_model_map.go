@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	sdk "github.com/DouDOU-start/airgate-sdk/sdkgo"
+	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
@@ -61,6 +62,29 @@ func rewriteChatRequestModel(body []byte, upstreamModel string) ([]byte, error) 
 		return body, nil
 	}
 	return sjson.SetBytes(body, "model", upstreamModel)
+}
+
+// restoreChatResponseModelData 把回给客户端的响应字节里的上游模型 ID 还原为公开名。
+//
+// chat_model_map 只应影响「发往上游的字节」，但上游会在响应里回显自己的模型 ID
+// （chat 的顶层 model、Responses API 的 response.model），不还原就把上游身份泄露
+// 给客户端（如 tokenforge/kimi-k3），且部分客户端会校验响应 model 与请求一致。
+// 计费侧的还原由 restoreMappedUsageModel 负责，此处只管客户端可见字节。
+//
+// 仅当字段值与上游 ID 完全一致时才改写，其余情况原样透传。
+func restoreChatResponseModelData(data, upstreamModel, publicModel string) string {
+	if data == "" || upstreamModel == "" || publicModel == "" || upstreamModel == publicModel {
+		return data
+	}
+	for _, key := range [...]string{"model", "response.model"} {
+		if gjson.Get(data, key).String() != upstreamModel {
+			continue
+		}
+		if patched, err := sjson.Set(data, key, publicModel); err == nil {
+			data = patched
+		}
+	}
+	return data
 }
 
 // restoreMappedUsageModel 把 Usage.Model 从上游 ID 还原为公开模型名，并按公开名重算成本。
