@@ -435,7 +435,7 @@ func readImageRefBytes(ref string, shrinkLimit int) (string, []byte, error) {
 }
 
 func downloadImageBytes(ref string) ([]byte, string, error) {
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := newImageRefHTTPClient()
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, ref, nil)
 	if err != nil {
 		return nil, "", fmt.Errorf("构建图片下载请求失败: %w", err)
