@@ -132,6 +132,17 @@ func handleStreamResponseWithKeepAliveOptions(logger *slog.Logger, resp *http.Re
 	imageGenCounter := newImageGenCallCounter()
 	suppressUsageDelimiter := false
 
+	// finishTerminalSSE 在协议终止事件([DONE]/response.completed/response.done)
+	// 已转发给客户端后补一个空行终结最后一个事件帧。终止事件之后立即停读、不再
+	// 等上游 EOF:部分中继上游(伪流式心跳实现)在终止事件后长期不关连接,继续
+	// 等 EOF 会输给「客户端收到终止事件即断连」的竞态——请求被误判 499
+	// client_canceled 且整笔计费丢失,而客户端实际已收到完整响应(2026-08-30
+	// 生产排查,占当时 499 总量 95%)。终止事件语义上即流结束,提前收尾不丢数据;
+	// 空行写失败说明客户端刚断开,usage 已在手,照常按成功出账即可。
+	finishTerminalSSE := func() {
+		_ = writeOrBufferSSELine(w, resp.StatusCode, "", &pending, &streamStarted, diagnostics.hasOutput())
+	}
+
 	for scanner.Scan() {
 		line := scanner.Text()
 		if suppressUsageDelimiter {
@@ -204,6 +215,10 @@ func handleStreamResponseWithKeepAliveOptions(logger *slog.Logger, resp *http.Re
 				_ = resp.Body.Close()
 				break
 			}
+			if data == "[DONE]" {
+				finishTerminalSSE()
+				break
+			}
 			continue
 		}
 		if !firstTokenRecorded && diagnostics.hasOutput() {
@@ -221,6 +236,10 @@ func handleStreamResponseWithKeepAliveOptions(logger *slog.Logger, resp *http.Re
 			streamErr = newDownstreamWriteError(fmt.Errorf("写入客户端 SSE 失败: %w", err))
 			clientWriteFailed = true
 			_ = resp.Body.Close()
+			break
+		}
+		if completed {
+			finishTerminalSSE()
 			break
 		}
 	}
