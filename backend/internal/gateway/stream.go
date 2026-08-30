@@ -90,6 +90,10 @@ func handleStreamResponseWithLogger(logger *slog.Logger, resp *http.Response, w 
 
 type streamResponseOptions struct {
 	suppressChatUsage bool
+	// publicModel/upstreamModel 非空 = 本次请求做过 chat_model_map 映射:
+	// 回给客户端的字节里要把上游回显的模型 ID 还原为公开名(restoreChatResponseModelData)。
+	publicModel   string
+	upstreamModel string
 }
 
 func handleStreamResponseWithOptions(logger *slog.Logger, resp *http.Response, w http.ResponseWriter, start time.Time, reqServiceTier string, options streamResponseOptions) (sdk.ForwardOutcome, error) {
@@ -197,6 +201,7 @@ func handleStreamResponseWithKeepAliveOptions(logger *slog.Logger, resp *http.Re
 		if ok && data != "" && data != "[DONE]" {
 			clientData := normalizeResponsesImageGenerationSSEData(data)
 			clientData = fillZeroedChatStreamUsageMirrors(clientData)
+			clientData = restoreChatResponseModelData(clientData, options.upstreamModel, options.publicModel)
 			if options.suppressChatUsage {
 				clientData, dropForClient = suppressChatStreamUsageForClient(clientData)
 			}
@@ -615,12 +620,21 @@ func firstNonZero(values ...int) int {
 
 // handleNonStreamResponse 处理非流式响应。resp.StatusCode 预设 2xx。
 func handleNonStreamResponse(resp *http.Response, w http.ResponseWriter, start time.Time, reqServiceTier string) (sdk.ForwardOutcome, error) {
+	return handleNonStreamResponseWithOptions(resp, w, start, reqServiceTier, streamResponseOptions{})
+}
+
+func handleNonStreamResponseWithOptions(resp *http.Response, w http.ResponseWriter, start time.Time, reqServiceTier string, options streamResponseOptions) (sdk.ForwardOutcome, error) {
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		reason := fmt.Sprintf("读取上游响应失败: %v", err)
 		return transientOutcome(reason), fmt.Errorf("%s", reason)
 	}
 	body = normalizeResponsesImageGenerationBody(body)
+	// 客户端可见字节先还原公开名;随后 parseUsage/bodyModel 也顺势回到公开名口径,
+	// restoreMappedUsageModel 仍作为计费侧兜底保留。
+	if options.upstreamModel != "" {
+		body = []byte(restoreChatResponseModelData(string(body), options.upstreamModel, options.publicModel))
+	}
 
 	parsed := parseUsage(body)
 

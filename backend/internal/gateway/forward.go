@@ -439,6 +439,9 @@ func (g *OpenAIGateway) forwardAPIKey(ctx context.Context, req *sdk.ForwardReque
 	// 别的型号（实测 deepseek-v4-pro-ga-260813 被按 Flash 计价，少收 3 倍）。
 	// 因此拿到 outcome 后必须把 Usage.Model 改回公开名并按公开名重算成本。
 	mappedPublicModel := ""
+	// mappedUpstreamModel 记录实际发往上游的模型 ID，供响应侧把回显的上游 ID
+	// 还原为公开名（restoreChatResponseModelData），避免上游身份泄露给客户端。
+	mappedUpstreamModel := ""
 	if !isImagesRequest(reqPath) && len(req.Body) > 0 {
 		publicChatModel := firstNonEmptyString(req.Model, gjson.GetBytes(req.Body, "model").String())
 		if upstreamChatModel := chatUpstreamModelForAccount(account, publicChatModel); upstreamChatModel != "" {
@@ -446,6 +449,7 @@ func (g *OpenAIGateway) forwardAPIKey(ctx context.Context, req *sdk.ForwardReque
 			if err == nil {
 				upstreamBody = rewritten
 				mappedPublicModel = publicChatModel
+				mappedUpstreamModel = upstreamChatModel
 				logger.Info("chat_upstream_model_resolved",
 					"public_model", publicChatModel,
 					"upstream_model", upstreamChatModel,
@@ -698,13 +702,18 @@ func (g *OpenAIGateway) forwardAPIKey(ctx context.Context, req *sdk.ForwardReque
 	if req.Stream && req.Writer != nil {
 		options := streamResponseOptions{
 			suppressChatUsage: chatStream && !clientWantsChatStreamUsage,
+			publicModel:       mappedPublicModel,
+			upstreamModel:     mappedUpstreamModel,
 		}
 		outcome, streamErr := handleStreamResponseWithOptions(logger, resp, req.Writer, start, reqServiceTier, options)
 		attachUpstreamTimings(&outcome, pluginPreMs, upstreamTTFBMs)
 		restoreMappedUsageModel(logger, &outcome, mappedPublicModel)
 		return outcome, streamErr
 	}
-	outcome, dispatchErr := handleNonStreamResponse(resp, req.Writer, start, reqServiceTier)
+	outcome, dispatchErr := handleNonStreamResponseWithOptions(resp, req.Writer, start, reqServiceTier, streamResponseOptions{
+		publicModel:   mappedPublicModel,
+		upstreamModel: mappedUpstreamModel,
+	})
 	attachUpstreamTimings(&outcome, pluginPreMs, upstreamTTFBMs)
 	restoreMappedUsageModel(logger, &outcome, mappedPublicModel)
 	return outcome, dispatchErr
