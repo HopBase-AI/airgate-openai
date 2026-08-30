@@ -164,7 +164,10 @@ func TestForwardHTTPRejectsRetiredDeepSeekAliasBeforeUpstream(t *testing.T) {
 	}
 }
 
-func TestForwardAPIKeyNonDeepSeekChatStreamLeavesBodyUnchanged(t *testing.T) {
+// 2026-08-30 起 include_usage 注入不再限于 DeepSeek Flash:vLLM 系上游(如
+// TokenForge kimi-k3)不带 include_usage 就不回 usage,流式请求会零计费落库。
+// 非 DeepSeek 的 chat 流同样注入,客户端未订阅时对客隐藏 usage、只供计费。
+func TestForwardAPIKeyNonDeepSeekChatStreamAlsoRequestsUsage(t *testing.T) {
 	originalBody := []byte("{\n  \"model\": \"gpt-5.4\",\n  \"messages\": [{\"role\": \"user\", \"content\": \"hi\"}],\n  \"stream\": true,\n  \"stream_options\": {\"include_usage\": false, \"vendor_trace\": \"keep\"}\n}")
 	requestBody := make(chan []byte, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -201,14 +204,30 @@ func TestForwardAPIKeyNonDeepSeekChatStreamLeavesBodyUnchanged(t *testing.T) {
 	if outcome.Kind != sdk.OutcomeSuccess {
 		t.Fatalf("outcome kind = %v, want success; reason=%s", outcome.Kind, outcome.Reason)
 	}
-	if upstreamBody := <-requestBody; string(upstreamBody) != string(originalBody) {
-		t.Fatalf("non-DeepSeek request body changed:\n got: %q\nwant: %q", upstreamBody, originalBody)
+	upstreamBody := <-requestBody
+	if !gjson.GetBytes(upstreamBody, "stream_options.include_usage").Bool() {
+		t.Fatalf("upstream include_usage not injected; body=%s", upstreamBody)
 	}
-	if string(request.Body) != string(originalBody) {
-		t.Fatalf("ForwardRequest body changed:\n got: %q\nwant: %q", request.Body, originalBody)
+	if got := gjson.GetBytes(upstreamBody, "stream_options.vendor_trace").String(); got != "keep" {
+		t.Fatalf("stream_options.vendor_trace = %q, want keep; body=%s", got, upstreamBody)
 	}
-	if writer.Body.String() != nonDeepSeekChatStream {
-		t.Fatalf("client stream changed:\n got: %q\nwant: %q", writer.Body.String(), nonDeepSeekChatStream)
+	clientBody := writer.Body.String()
+	// 客户端显式 include_usage=false:回包不得出现 usage,但内容与 [DONE] 完整。
+	if strings.Contains(clientBody, `"usage"`) {
+		t.Fatalf("client stream should hide usage: %q", clientBody)
+	}
+	if !strings.Contains(clientBody, `"content":"ok"`) || !strings.Contains(clientBody, "data: [DONE]") {
+		t.Fatalf("client stream lost completion data: %q", clientBody)
+	}
+	// 计费侧仍拿到完整 usage。
+	if outcome.Usage == nil {
+		t.Fatal("outcome usage = nil, want parsed usage for billing")
+	}
+	if got := usageMetricValue(outcome.Usage, usageMetricInputTokens); got != 5 {
+		t.Fatalf("usage input tokens = %v, want 5", got)
+	}
+	if got := usageMetricValue(outcome.Usage, usageMetricOutputTokens); got != 1 {
+		t.Fatalf("usage output tokens = %v, want 1", got)
 	}
 }
 

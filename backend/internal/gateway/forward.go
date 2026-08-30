@@ -258,11 +258,12 @@ func (g *OpenAIGateway) forwardAPIKey(ctx context.Context, req *sdk.ForwardReque
 		return g.forwardAPIKeyGeminiImageChat(ctx, req, reqServiceTier, start)
 	}
 	targetURL := buildAPIKeyURL(account, upstreamImagesPath(account, reqPath))
-	// TokenHub 的 DeepSeek Flash Chat 流只有收到 include_usage 才保证返回计费 token；
-	// 客户端未订阅时，仍向上游请求 usage，但在回包阶段隐藏额外的 usage。
-	chatStream := req.Stream &&
-		isChatCompletionsPath(reqPath) &&
-		isDeepSeekFlashModel(firstNonEmptyString(req.Model, gjson.GetBytes(req.Body, "model").String()))
+	// vLLM 系与多数中继的 Chat 流只有收到 include_usage 才返回计费 token
+	// （标准 OpenAI 语义；历史上只对 TokenHub DeepSeek Flash 特判，TokenForge
+	// kimi-k3 实测同病：客户端不带 include_usage 就零 usage 落库=漏计费）。
+	// 一律向上游请求 usage；客户端未订阅时在回包阶段隐藏额外的 usage chunk，
+	// 只供计费使用。上游本就回 usage 的（OpenAI 官方等）行为不变。
+	chatStream := req.Stream && isChatCompletionsPath(reqPath)
 	clientWantsChatStreamUsage := false
 	if chatStream {
 		clientWantsChatStreamUsage = gjson.GetBytes(req.Body, "stream_options.include_usage").Bool()
@@ -724,10 +725,6 @@ func isChatCompletionsPath(path string) bool {
 		path = path[:query]
 	}
 	return strings.HasSuffix(path, "/chat/completions")
-}
-
-func isDeepSeekFlashModel(modelID string) bool {
-	return strings.TrimSpace(modelID) == "deepseek-v4-flash-202605"
 }
 
 func ensureUpstreamChatStreamUsage(body []byte) []byte {
