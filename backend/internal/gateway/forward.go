@@ -176,8 +176,13 @@ func (g *OpenAIGateway) forwardHTTP(ctx context.Context, req *sdk.ForwardRequest
 		return accountDeadOutcome(reason), fmt.Errorf("%s", reason)
 	}
 	// 同步图像请求在等待上游期间输出保活空白,避免 CF 边缘 ~100s 无字节切断。
+	// dispatch 全程按「无 Writer」的旧同步路径执行(最终响应只经 outcome 由 core 写出),
+	// 真实 Writer 仅由保活使用——否则下游会唤醒历史上依赖「同步必无 Writer」的直写分支
+	// (如 handleImagesResponse 的 w != nil 兜底),造成 body 双写(2026-08-31 生产实测)。
 	if syncImagesWriter && isImagesRequest(reqPath) && req.Writer != nil {
-		return g.withImagesSyncKeepAlive(ctx, req.Writer, dispatch)
+		clientWriter := req.Writer
+		req.Writer = nil
+		return g.withImagesSyncKeepAlive(ctx, clientWriter, dispatch)
 	}
 	return dispatch(ctx)
 }
