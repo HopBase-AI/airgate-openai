@@ -40,6 +40,16 @@ func redactURL(rawURL string) string {
 
 // forwardHTTP 根据账号凭证类型分发到不同转发模式
 func (g *OpenAIGateway) forwardHTTP(ctx context.Context, req *sdk.ForwardRequest) (sdk.ForwardOutcome, error) {
+	// core 对同步图像生成/编辑请求也会传入客户端 Writer 并打标记头(用于等待期保活,
+	// 见 keepalive.go 的 jsonSyncKeepAlive)。该传输经 gRPC ForwardStream,其服务端会把
+	// req.Stream 硬置 true——这里立刻恢复同步语义,防止下游误走流式分支(如 web-reverse
+	// 的 SSE ping)。Writer 只用于保活字节,最终响应仍经 outcome 由 core 写出。
+	syncImagesWriter := req.Headers.Get(headerImagesSyncWriter) == "1"
+	if syncImagesWriter {
+		req.Headers.Del(headerImagesSyncWriter)
+		req.Stream = false
+	}
+
 	requestedModel := firstNonEmptyString(req.Model, gjson.GetBytes(req.Body, "model").String())
 	if model.IsRetired(requestedModel) {
 		message := "模型 " + strings.TrimSpace(requestedModel) + " 未启用，请使用 deepseek-v4-flash-202605"
@@ -132,32 +142,44 @@ func (g *OpenAIGateway) forwardHTTP(ctx context.Context, req *sdk.ForwardRequest
 			taskType = taskTypeImageEdit
 		}
 		if handler := g.tasks.Get(taskType); handler != nil {
+			// 异步提交的 202 响应经 outcome 返回;清掉保活用的 Writer,
+			// 避免 task_runner 直写 + core 回写造成响应体双写。
+			if syncImagesWriter {
+				req.Writer = nil
+			}
 			return g.forwardTask(ctx, req, reqPath, handler)
 		}
 	}
 
-	if account.Credentials["api_key"] != "" {
-		if isImagesRequest(reqPath) && accountRequiresResponsesImageTool(req.Headers) {
-			return g.forwardAPIKeyImagesViaResponsesTool(ctx, req, reqServiceTier)
-		}
-		return g.forwardAPIKey(ctx, req, reqServiceTier)
-	}
-	if account.Credentials["access_token"] != "" {
-		if isImagesRequest(reqPath) {
-			if shouldUseImagesWebReverse(account, req.Model) {
-				return g.forwardImagesViaWebReverse(ctx, req)
+	dispatch := func(ctx context.Context) (sdk.ForwardOutcome, error) {
+		if account.Credentials["api_key"] != "" {
+			if isImagesRequest(reqPath) && accountRequiresResponsesImageTool(req.Headers) {
+				return g.forwardAPIKeyImagesViaResponsesTool(ctx, req, reqServiceTier)
 			}
-			return g.forwardImagesViaResponsesTool(ctx, req)
+			return g.forwardAPIKey(ctx, req, reqServiceTier)
 		}
-		return g.forwardOAuth(ctx, req)
+		if account.Credentials["access_token"] != "" {
+			if isImagesRequest(reqPath) {
+				if shouldUseImagesWebReverse(account, req.Model) {
+					return g.forwardImagesViaWebReverse(ctx, req)
+				}
+				return g.forwardImagesViaResponsesTool(ctx, req)
+			}
+			return g.forwardOAuth(ctx, req)
+		}
+		reason := "账号缺少 api_key 或 access_token"
+		sdk.LoggerFromContext(ctx).Error("forward_dispatch_failed",
+			sdk.LogFieldAccountID, account.ID,
+			sdk.LogFieldReason, reason,
+			sdk.LogFieldError, reason,
+		)
+		return accountDeadOutcome(reason), fmt.Errorf("%s", reason)
 	}
-	reason := "账号缺少 api_key 或 access_token"
-	sdk.LoggerFromContext(ctx).Error("forward_dispatch_failed",
-		sdk.LogFieldAccountID, account.ID,
-		sdk.LogFieldReason, reason,
-		sdk.LogFieldError, reason,
-	)
-	return accountDeadOutcome(reason), fmt.Errorf("%s", reason)
+	// 同步图像请求在等待上游期间输出保活空白,避免 CF 边缘 ~100s 无字节切断。
+	if syncImagesWriter && isImagesRequest(reqPath) && req.Writer != nil {
+		return g.withImagesSyncKeepAlive(ctx, req.Writer, dispatch)
+	}
+	return dispatch(ctx)
 }
 
 // isImageTaskListRequest 判断是否为 GET /v1/images/tasks/list 历史列表查询。
@@ -1391,4 +1413,26 @@ func (g *OpenAIGateway) doStreamableUpstream(ctx context.Context, upstreamReq *h
 		resp.Body = newStallGuardBody(resp.Body, g.streamIdleTimeout(), cancel)
 	}
 	return resp, cancel, nil
+}
+
+// withImagesSyncKeepAlive 同步图像请求的保活包装:等待上游期间由 jsonSyncKeepAlive
+// 输出 JSON 前导空白;客户端断开(保活写失败)时取消 dispatch,沿用既有取消语义。
+// 上游成功但客户端恰在完成边界断开时保留 Success(与 v0.2.247 完成边界计费语义一致)。
+func (g *OpenAIGateway) withImagesSyncKeepAlive(ctx context.Context, w http.ResponseWriter, dispatch func(context.Context) (sdk.ForwardOutcome, error)) (sdk.ForwardOutcome, error) {
+	dispatchCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	ka := startJSONSyncKeepAlive(w, func(error) { cancel() })
+	outcome, err := dispatch(dispatchCtx)
+	ka.Stop()
+	return g.withImagesSyncKeepAliveResult(ka, outcome, err)
+}
+
+// withImagesSyncKeepAliveResult 汇总保活与 dispatch 的结果:客户端断开(保活写失败)
+// 且非 Success 时转 StreamAborted(不迁怒所选账号);Success 一律保留(完成边界断开
+// 按 v0.2.247 语义照常计费)。
+func (g *OpenAIGateway) withImagesSyncKeepAliveResult(ka *jsonSyncKeepAlive, outcome sdk.ForwardOutcome, err error) (sdk.ForwardOutcome, error) {
+	if downstreamErr := ka.Err(); downstreamErr != nil && outcome.Kind != sdk.OutcomeSuccess {
+		return streamAbortedOutcome(downstreamErr, outcome.Usage, outcome.Duration), nil
+	}
+	return outcome, err
 }
