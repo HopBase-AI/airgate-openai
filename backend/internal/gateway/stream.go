@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/tidwall/gjson"
@@ -94,7 +95,16 @@ type streamResponseOptions struct {
 	// 回给客户端的字节里要把上游回显的模型 ID 还原为公开名(restoreChatResponseModelData)。
 	publicModel   string
 	upstreamModel string
+	// firstOutputTimeout 首个真实输出的看门狗时限:超时且尚未向客户端写出任何内容时,
+	// 关闭上游连接并判 UpstreamTransient,由 core 换账号重试(<0 表示关闭看门狗)。
+	firstOutputTimeout time.Duration
 }
+
+// defaultFirstOutputTimeout 是流式请求「上游一个真实事件都不产出」的容忍上限。
+// 取值依据(2026-09-01 生产实测,Codex Pro 主力上游):首字中位 3.3s、p95 约 21s、
+// p99 46s;真正卡死的样本是 45s+ 一个字节都没有,客户端先行放弃、被记成
+// client_canceled(近 7 天 706 次)。30s 落在 p95 之上、卡死样本之下。
+const defaultFirstOutputTimeout = 30 * time.Second
 
 func handleStreamResponseWithOptions(logger *slog.Logger, resp *http.Response, w http.ResponseWriter, start time.Time, reqServiceTier string, options streamResponseOptions) (sdk.ForwardOutcome, error) {
 	return handleStreamResponseWithKeepAliveOptions(logger, resp, w, start, reqServiceTier, responseStreamKeepAliveInterval, options)
@@ -119,6 +129,28 @@ func handleStreamResponseWithKeepAliveOptions(logger *slog.Logger, resp *http.Re
 	})
 	defer keepAlive.Stop()
 
+	// 首个真实输出看门狗:上游接了连接却长时间一个事件都不吐时主动断开,交给 core 换账号。
+	// 触发时客户端只收到过我们自己的 SSE 注释心跳(上游事件都还在 pending 缓冲里未写出),
+	// 因此重试不会产生重复内容。
+	firstOutputTimeout := options.firstOutputTimeout
+	if firstOutputTimeout == 0 {
+		firstOutputTimeout = defaultFirstOutputTimeout
+	}
+	var firstOutputTimedOut atomic.Bool
+	var firstOutputWatchdog *time.Timer
+	if firstOutputTimeout > 0 {
+		firstOutputWatchdog = time.AfterFunc(firstOutputTimeout, func() {
+			firstOutputTimedOut.Store(true)
+			_ = resp.Body.Close()
+		})
+		defer firstOutputWatchdog.Stop()
+	}
+	stopFirstOutputWatchdog := func() {
+		if firstOutputWatchdog != nil {
+			firstOutputWatchdog.Stop()
+		}
+	}
+
 	usage := newTokenUsage("", reqServiceTier, 0, 0, 0, 0, 0)
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 64*1024), upstreamSSEMaxLineBytes)
@@ -135,6 +167,7 @@ func handleStreamResponseWithKeepAliveOptions(logger *slog.Logger, resp *http.Re
 	var toolImageIn, toolImageOut int // 接收 response.tool_usage.image_gen，用于图像工具计费。
 	imageGenCounter := newImageGenCallCounter()
 	suppressUsageDelimiter := false
+	upstreamKeepAliveFrames := 0
 
 	// finishTerminalSSE 在协议终止事件([DONE]/response.completed/response.done)
 	// 已转发给客户端后补一个空行终结最后一个事件帧。终止事件之后立即停读、不再
@@ -159,6 +192,13 @@ func handleStreamResponseWithKeepAliveOptions(logger *slog.Logger, resp *http.Re
 		data, ok := extractSSEData(line)
 		if ok {
 			data = strings.TrimSpace(data)
+			// 上游把保活帧伪装成正文增量时一律丢弃:不转发、不计入诊断。否则会误停缓冲、
+			// 把 TTFT 记成保活时刻,并让 core 误判「内容已下发」而放弃 failover。
+			if isUpstreamKeepAliveSSEData(data) {
+				upstreamKeepAliveFrames++
+				suppressUsageDelimiter = true
+				continue
+			}
 			diagnostics.observeData(data)
 			if debugUpstreamSSE && data != "" {
 				logUpstreamSSEDataDebug(logger, diagnostics, data)
@@ -229,6 +269,7 @@ func handleStreamResponseWithKeepAliveOptions(logger *slog.Logger, resp *http.Re
 		if !firstTokenRecorded && diagnostics.hasOutput() {
 			usage.FirstTokenMs = time.Since(start).Milliseconds()
 			firstTokenRecorded = true
+			stopFirstOutputWatchdog()
 		}
 		if dropForClient {
 			suppressUsageDelimiter = true
@@ -255,6 +296,21 @@ func handleStreamResponseWithKeepAliveOptions(logger *slog.Logger, resp *http.Re
 	}
 	if err := scanner.Err(); err != nil && streamErr == nil {
 		streamErr = fmt.Errorf("读取上游 SSE 失败: %w", err)
+	}
+	// 看门狗触发且未向客户端写出任何内容:判可重试的上游瞬时故障,core 会换账号重来。
+	// 已经开始出内容再断的情况不走这里(重试会重复内容),仍按原有流中断语义处理。
+	if firstOutputTimedOut.Load() && !streamStarted && !clientWriteFailed {
+		logger.Warn("upstream_first_output_timeout",
+			"timeout_s", firstOutputTimeout.Seconds(),
+			"upstream_keepalive_frames", upstreamKeepAliveFrames,
+			"elapsed_ms", time.Since(start).Milliseconds(),
+		)
+		return sdk.ForwardOutcome{
+			Kind:     sdk.OutcomeUpstreamTransient,
+			Upstream: sdk.UpstreamResponse{StatusCode: http.StatusBadGateway},
+			Reason:   fmt.Sprintf("上游 %.0fs 未产出任何内容,换账号重试", firstOutputTimeout.Seconds()),
+			Duration: time.Since(start),
+		}, nil
 	}
 	if streamErr == nil && !completed {
 		streamErr = fmt.Errorf("未收到上游流式完成事件")
@@ -870,8 +926,38 @@ func streamDiagnosticFinishReason(data string) string {
 	return ""
 }
 
+// upstreamKeepAliveMarker 是部分中转把保活帧伪装成正文增量时带的显式标记
+// （2026-09-01 生产实测：贾克斯中继发
+// {"type":"response.output_text.delta","item_id":"SSE-Keep-Alive","delta":"​","SSE-Keep-Alive":true}）。
+const upstreamKeepAliveMarker = "SSE-Keep-Alive"
+
+// isUpstreamKeepAliveSSEData 判定一条上游 SSE 数据是否只是保活帧。
+// 只认显式标记，避免误伤正常内容；保活帧一律不转发给客户端——它既不是内容，
+// 又会让「是否已经开始出内容」的判断失真（进而误停缓冲、污染 TTFT、堵死 failover）。
+func isUpstreamKeepAliveSSEData(data string) bool {
+	if data == "" || data == "[DONE]" {
+		return false
+	}
+	if gjson.Get(data, upstreamKeepAliveMarker).Bool() {
+		return true
+	}
+	return gjson.Get(data, "item_id").String() == upstreamKeepAliveMarker
+}
+
+// invisibleDeltaCutset 是不构成可见内容的字符：常规空白之外，再加零宽系列。
+// Go 的 unicode.IsSpace 不含 U+200B，导致「零宽空格增量」曾被当成真实首字。
+const invisibleDeltaCutset = " \t\n\r\v\f\u00a0\u200b\u200c\u200d\ufeff"
+
+// hasVisibleDelta 报告一段增量文本是否含可见内容。
+func hasVisibleDelta(text string) bool {
+	return strings.Trim(text, invisibleDeltaCutset) != ""
+}
+
 func streamDataHasOutput(data string) bool {
 	if data == "" || data == "[DONE]" {
+		return false
+	}
+	if isUpstreamKeepAliveSSEData(data) {
 		return false
 	}
 	if streamChatChoicesHaveOutput(data) {
@@ -881,9 +967,9 @@ func streamDataHasOutput(data string) bool {
 	eventType := gjson.Get(data, "type").String()
 	switch eventType {
 	case "response.output_text.delta", "response.reasoning_summary_text.delta", "response.refusal.delta":
-		return strings.TrimSpace(gjson.Get(data, "delta").String()) != ""
+		return hasVisibleDelta(gjson.Get(data, "delta").String())
 	case "response.output_text.done":
-		return strings.TrimSpace(gjson.Get(data, "text").String()) != ""
+		return hasVisibleDelta(gjson.Get(data, "text").String())
 	case "response.function_call_arguments.delta":
 		return gjson.Get(data, "delta").Exists()
 	case "response.function_call_arguments.done":
