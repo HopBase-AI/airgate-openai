@@ -106,6 +106,41 @@ type streamResponseOptions struct {
 // client_canceled(近 7 天 706 次)。30s 落在 p95 之上、卡死样本之下。
 const defaultFirstOutputTimeout = 30 * time.Second
 
+// forwardAttemptHeader core 在每次 failover 尝试时带上的 1-based 序号(见 core buildPluginRequest)。
+const forwardAttemptHeader = "X-Airgate-Attempt"
+
+// forwardAttemptFromHeaders 解析本次是第几次尝试;缺失 / 非法按第 1 次。
+func forwardAttemptFromHeaders(h http.Header) int {
+	if h == nil {
+		return 1
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(h.Get(forwardAttemptHeader)))
+	if err != nil || n < 1 {
+		return 1
+	}
+	return n
+}
+
+// firstOutputTimeoutForAttempt 按 failover 次序放宽首字看门狗。
+//
+// 首次尝试保持 base(30s)——真卡死要尽快识别换号;但换号后的重试面对的是缓存必然未命中
+// 的新账号,合法首字只会更慢(2026-09-02 生产:Codex 成功请求头后沉默 p99 21.5s,
+// 看门狗单日开火 58 次、elapsed p50 35s,其中相当一部分是「慢而活着」被判死后在下一账号
+// 再次被判死,三次穷尽 502)。第 2 次 60s、第 3 次起 90s,让重试有机会等到首字,
+// 而真卡死仍在第一跳 30s 内被识别。
+func firstOutputTimeoutForAttempt(base time.Duration, attempt int) time.Duration {
+	if base <= 0 {
+		return base
+	}
+	switch {
+	case attempt >= 3:
+		return max(base, 90*time.Second)
+	case attempt == 2:
+		return max(base, 60*time.Second)
+	}
+	return base
+}
+
 // firstOutputTimeoutForBody 按请求体大小放宽首字看门狗。
 //
 // 2026-09-02 生产实测(用户 36,codex-tui,上下文 24 万 token / 请求体 2.7MB):这类请求
