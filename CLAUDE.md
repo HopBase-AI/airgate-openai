@@ -12,8 +12,9 @@
   `first_byte_timeout`(等响应头上限,默认 60s)/ `stream_idle_timeout`(读空闲上限,默认 60s),
   值为 Go duration(如 `30s`),优先于插件 config。同一插件下上游差异太大不能一刀切:Codex 中继
   偶发连响应头都 60s 不回(用户 45s 就放弃),而 inference.ai 合法首字 p50 就 25s。
-- **首字看门狗按请求体分档**(`stream.go` `firstOutputTimeoutForBody`,2026-09-02):<1MB 30s,1~2MB 60s,
-  ≥2MB 90s。24 万 token 的 Codex 上下文合法首字就要 20~55s,一刀切 30s 会把它们误杀成 failover 循环
+- **首字看门狗按请求体与重试次序分档**(`stream.go` `firstOutputTimeoutForBody` / `firstOutputTimeoutForAttempt`,
+  2026-09-02,取两者较大):请求体 <1MB 30s、1~2MB 60s、≥2MB 90s;core 经 `X-Airgate-Attempt` 传 failover
+  序号,第 2 次 60s、第 3 次起 90s——换号后缓存必然未命中,合法首字更慢,同样的 30s 会把「慢而活着」连杀三次。24 万 token 的 Codex 上下文合法首字就要 20~55s,一刀切 30s 会把它们误杀成 failover 循环
   (换号后缓存未命中只会更慢),三次穷尽后 502;卡死判定对 99% 的小请求不变。
 - **账号 `base_url` 带路径时必须自带版本段**（`request.go` `buildAPIKeyURL`，2026-09-01 踩坑）：
   base_url 有路径 → 视为完整 API 前缀，**请求路径里的 `/v1` 会被剥掉**再拼（为兼容火山方舟

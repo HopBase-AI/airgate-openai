@@ -135,3 +135,46 @@ func TestFirstOutputTimeoutForBody(t *testing.T) {
 		t.Fatalf("关闭看门狗未透传: %v", got)
 	}
 }
+
+// 换号重试时看门狗按次序放宽;首次不变;头缺失或非法按第 1 次。
+func TestFirstOutputTimeoutForAttempt(t *testing.T) {
+	base := 30 * time.Second
+	for attempt, want := range map[int]time.Duration{0: base, 1: base, 2: 60 * time.Second, 3: 90 * time.Second, 5: 90 * time.Second} {
+		if got := firstOutputTimeoutForAttempt(base, attempt); got != want {
+			t.Fatalf("attempt %d = %v, want %v", attempt, got, want)
+		}
+	}
+	if got := firstOutputTimeoutForAttempt(120*time.Second, 2); got != 120*time.Second {
+		t.Fatalf("更高基线被压低: %v", got)
+	}
+	if got := firstOutputTimeoutForAttempt(-1, 3); got != -1 {
+		t.Fatalf("关闭看门狗未透传: %v", got)
+	}
+
+	cases := map[string]int{"": 1, "abc": 1, "0": 1, "-2": 1, "2": 2, " 3 ": 3}
+	for raw, want := range cases {
+		h := http.Header{}
+		if raw != "" {
+			h.Set(forwardAttemptHeader, raw)
+		}
+		if got := forwardAttemptFromHeaders(h); got != want {
+			t.Fatalf("header %q = %d, want %d", raw, got, want)
+		}
+	}
+	if got := forwardAttemptFromHeaders(nil); got != 1 {
+		t.Fatalf("nil headers = %d", got)
+	}
+}
+
+// 内部头不得透传给上游(白名单机制)。
+func TestForwardAttemptHeaderNotPassedUpstream(t *testing.T) {
+	src := http.Header{forwardAttemptHeader: []string{"2"}, "Openai-Beta": []string{"x"}}
+	dst := http.Header{}
+	passHeaders(src, dst)
+	if dst.Get(forwardAttemptHeader) != "" {
+		t.Fatal("X-Airgate-Attempt 泄漏给上游")
+	}
+	if dst.Get("Openai-Beta") != "x" {
+		t.Fatal("白名单头未透传")
+	}
+}
