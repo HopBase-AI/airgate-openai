@@ -8,6 +8,11 @@
 ## 🚫 红线
 
 - **只依赖 `airgate-sdk`**，禁止 import `airgate-core` 内部包。
+- **账号 `base_url` 带路径时必须自带版本段**（`request.go` `buildAPIKeyURL`，2026-09-01 踩坑）：
+  base_url 有路径 → 视为完整 API 前缀，**请求路径里的 `/v1` 会被剥掉**再拼（为兼容火山方舟
+  `/api/v3` 这类前缀）。所以中继给的专属路由 `https://host/gw/xxx` 必须配成 `https://host/gw/xxx/v1`，
+  配成 `https://host/gw/xxx` 会拼出 `/gw/xxx/chat/completions` → 上游 404,
+  症状极像「这条路由没开通我们的模型」（假 key 401、真 key 404）。只有域名的 base_url 不受影响。
 - 要用 core 能力（用量、配置等）只能经 `Host.Invoke` / `Host.InvokeStream`。
 - **`plugin.yaml` 由 `make manifest` 生成，不可手改**（模型/路由/账号字段在 Go 代码里声明）。
 - 前端是单 `index.js` bundle，输出到 `web/dist/index.js`，用 `@doudou-start/airgate-theme`。
