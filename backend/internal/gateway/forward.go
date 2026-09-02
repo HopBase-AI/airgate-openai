@@ -729,9 +729,10 @@ func (g *OpenAIGateway) forwardAPIKey(ctx context.Context, req *sdk.ForwardReque
 
 	if req.Stream && req.Writer != nil {
 		options := streamResponseOptions{
-			suppressChatUsage: chatStream && !clientWantsChatStreamUsage,
-			publicModel:       mappedPublicModel,
-			upstreamModel:     mappedUpstreamModel,
+			suppressChatUsage:  chatStream && !clientWantsChatStreamUsage,
+			publicModel:        mappedPublicModel,
+			upstreamModel:      mappedUpstreamModel,
+			firstOutputTimeout: firstOutputTimeoutForBody(defaultFirstOutputTimeout, len(req.Body)),
 		}
 		outcome, streamErr := handleStreamResponseWithOptions(logger, resp, req.Writer, start, reqServiceTier, options)
 		attachUpstreamTimings(&outcome, pluginPreMs, upstreamTTFBMs)
@@ -1399,7 +1400,7 @@ func (g *OpenAIGateway) doStreamableUpstream(ctx context.Context, upstreamReq *h
 
 	var firstByteTimer *time.Timer
 	if stream {
-		firstByteTimer = time.AfterFunc(g.firstByteTimeout(), cancel)
+		firstByteTimer = time.AfterFunc(g.firstByteTimeoutFor(account), cancel)
 	}
 
 	client := g.buildHTTPClient(account)
@@ -1415,9 +1416,47 @@ func (g *OpenAIGateway) doStreamableUpstream(ctx context.Context, upstreamReq *h
 		return nil, nil, err
 	}
 	if stream {
-		resp.Body = newStallGuardBody(resp.Body, g.streamIdleTimeout(), cancel)
+		resp.Body = newStallGuardBody(resp.Body, g.streamIdleTimeoutFor(account), cancel)
 	}
 	return resp, cancel, nil
+}
+
+// accountTimeoutOverride 按账号覆盖的流式超时（账号凭证键，值为 Go duration，如 "30s"）。
+//
+// 同一插件下各上游差异太大，插件级 config 一刀切不了：Codex 中继（贾克斯 / 卡卡）
+// 偶发连响应头都 60s 不回（2026-09-02 单日 56 号账号 16 次），用户 45s 左右就放弃，
+// 60s 的响应头上限比 30s 首字看门狗还长，等于在这类上游上看门狗形同虚设；
+// 而 inference.ai 这类上游合法首字 p50 就 25s，全局压到 30s 会把它误杀成降级抖动。
+// 解析失败 / 非正值一律视为未配置，回落插件 config 与默认值。
+func accountTimeoutOverride(account *sdk.Account, key string) time.Duration {
+	if account == nil || account.Credentials == nil {
+		return 0
+	}
+	raw := strings.TrimSpace(account.Credentials[key])
+	if raw == "" {
+		return 0
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 {
+		return 0
+	}
+	return d
+}
+
+// firstByteTimeoutFor 流式等响应头上限：账号凭证 first_byte_timeout > 插件 config > 默认 60s。
+func (g *OpenAIGateway) firstByteTimeoutFor(account *sdk.Account) time.Duration {
+	if d := accountTimeoutOverride(account, "first_byte_timeout"); d > 0 {
+		return d
+	}
+	return g.firstByteTimeout()
+}
+
+// streamIdleTimeoutFor 流式读空闲上限：账号凭证 stream_idle_timeout > 插件 config > 默认 60s。
+func (g *OpenAIGateway) streamIdleTimeoutFor(account *sdk.Account) time.Duration {
+	if d := accountTimeoutOverride(account, "stream_idle_timeout"); d > 0 {
+		return d
+	}
+	return g.streamIdleTimeout()
 }
 
 // withImagesSyncKeepAlive 同步图像请求的保活包装:等待上游期间由 jsonSyncKeepAlive
