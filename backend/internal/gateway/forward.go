@@ -737,7 +737,22 @@ func (g *OpenAIGateway) forwardAPIKey(ctx context.Context, req *sdk.ForwardReque
 				firstOutputTimeoutForAttempt(defaultFirstOutputTimeout, forwardAttemptFromHeaders(req.Headers)),
 			),
 		}
-		outcome, streamErr := handleStreamResponseWithOptions(logger, resp, req.Writer, start, reqServiceTier, options)
+		var outcome sdk.ForwardOutcome
+		var streamErr error
+		if hedgeAfter := g.hedgeAfterFor(account); hedgeAfter > 0 && streamable {
+			// 首字前双发对冲(见 hedge.go):第二路重建同一上游请求。
+			method, url, hdr, body := reqMethod, targetURL, upstreamReq.Header.Clone(), upstreamBody
+			startSecond := func(hctx context.Context) (*http.Response, context.CancelFunc, error) {
+				req2, err := cloneUpstreamRequest(hctx, method, url, hdr, body)
+				if err != nil {
+					return nil, nil, err
+				}
+				return g.doStreamableUpstream(hctx, req2, account, true)
+			}
+			outcome, streamErr = runHedgedStream(requestCtx, logger, resp, cancel, req.Writer, start, reqServiceTier, options, hedgeAfter, startSecond)
+		} else {
+			outcome, streamErr = handleStreamResponseWithOptions(logger, resp, req.Writer, start, reqServiceTier, options)
+		}
 		attachUpstreamTimings(&outcome, pluginPreMs, upstreamTTFBMs)
 		restoreMappedUsageModel(logger, &outcome, mappedPublicModel)
 		return outcome, streamErr

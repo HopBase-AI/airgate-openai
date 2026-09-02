@@ -12,6 +12,10 @@
   `first_byte_timeout`(等响应头上限,默认 60s)/ `stream_idle_timeout`(读空闲上限,默认 60s),
   值为 Go duration(如 `30s`),优先于插件 config。同一插件下上游差异太大不能一刀切:Codex 中继
   偶发连响应头都 60s 不回(用户 45s 就放弃),而 inference.ai 合法首字 p50 就 25s。
+- **首字前双发对冲**(`hedge.go`,2026-09-03,默认关闭):账号凭证 `hedge_after`(如 `10s`)或插件 config
+  开启后,SSE token 流在该时长内无真实输出就对同一上游再发一份,谁先出字谁写客户端(`hedgeGate` 独占门闸,
+  首字前两路都在缓冲态所以可二选一),另一路取消;每请求最多一次,全局在飞对冲 ≤8。输家上游可能仍计费,
+  是用费用换首字确定性。生图/非流式不对冲。
 - **首字看门狗按请求体与重试次序分档**(`stream.go` `firstOutputTimeoutForBody` / `firstOutputTimeoutForAttempt`,
   2026-09-02,取两者较大):请求体 <1MB 30s、1~2MB 60s、≥2MB 90s;core 经 `X-Airgate-Attempt` 传 failover
   序号,第 2 次 60s、第 3 次起 90s——换号后缓存必然未命中,合法首字更慢,同样的 30s 会把「慢而活着」连杀三次。24 万 token 的 Codex 上下文合法首字就要 20~55s,一刀切 30s 会把它们误杀成 failover 循环
