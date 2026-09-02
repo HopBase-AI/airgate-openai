@@ -729,9 +729,10 @@ func (g *OpenAIGateway) forwardAPIKey(ctx context.Context, req *sdk.ForwardReque
 
 	if req.Stream && req.Writer != nil {
 		options := streamResponseOptions{
-			suppressChatUsage: chatStream && !clientWantsChatStreamUsage,
-			publicModel:       mappedPublicModel,
-			upstreamModel:     mappedUpstreamModel,
+			suppressChatUsage:  chatStream && !clientWantsChatStreamUsage,
+			publicModel:        mappedPublicModel,
+			upstreamModel:      mappedUpstreamModel,
+			firstOutputTimeout: firstOutputTimeoutForBody(defaultFirstOutputTimeout, len(req.Body)),
 		}
 		outcome, streamErr := handleStreamResponseWithOptions(logger, resp, req.Writer, start, reqServiceTier, options)
 		attachUpstreamTimings(&outcome, pluginPreMs, upstreamTTFBMs)

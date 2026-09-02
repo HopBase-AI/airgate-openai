@@ -105,3 +105,33 @@ func TestDoStreamableUpstream_AccountFirstByteOverride(t *testing.T) {
 		t.Fatalf("status = %d", resp.StatusCode)
 	}
 }
+
+// 超大上下文的合法首字本来就要 20~55s,看门狗必须按请求体大小放宽;小请求保持不变。
+func TestFirstOutputTimeoutForBody(t *testing.T) {
+	base := 30 * time.Second
+	cases := []struct {
+		name  string
+		bytes int
+		want  time.Duration
+	}{
+		{"小请求保持 30s", 400 << 10, 30 * time.Second},
+		{"1MB 边界放宽到 60s", 1 << 20, 60 * time.Second},
+		{"1.5MB 60s", 1536 << 10, 60 * time.Second},
+		{"2MB 边界放宽到 90s", 2 << 20, 90 * time.Second},
+		{"2.7MB(生产样本)90s", 2700 << 10, 90 * time.Second},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := firstOutputTimeoutForBody(base, tc.bytes); got != tc.want {
+				t.Fatalf("firstOutputTimeoutForBody(%d) = %v, want %v", tc.bytes, got, tc.want)
+			}
+		})
+	}
+	// 插件 config 把基线调得更高时不被分档压低;关闭看门狗(<=0)原样透传
+	if got := firstOutputTimeoutForBody(120*time.Second, 3<<20); got != 120*time.Second {
+		t.Fatalf("更高的基线被压低: %v", got)
+	}
+	if got := firstOutputTimeoutForBody(-1, 3<<20); got != -1 {
+		t.Fatalf("关闭看门狗未透传: %v", got)
+	}
+}

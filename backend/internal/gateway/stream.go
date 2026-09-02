@@ -106,6 +106,28 @@ type streamResponseOptions struct {
 // client_canceled(近 7 天 706 次)。30s 落在 p95 之上、卡死样本之下。
 const defaultFirstOutputTimeout = 30 * time.Second
 
+// firstOutputTimeoutForBody 按请求体大小放宽首字看门狗。
+//
+// 2026-09-02 生产实测(用户 36,codex-tui,上下文 24 万 token / 请求体 2.7MB):这类请求
+// 在三家上游的**合法**首字都要 20~55s(换号后缓存必然未命中,只会更长),30s 看门狗把它
+// 们全部误杀→failover 到下一个账号→再次 >30s→三次穷尽后 502,一天 13 次;每次 failover
+// 还在烧 24 万 token 的预填成本。同一时段其他用户在同一账号上 96 次全部成功——不是上游
+// 挂了,是阈值对超大上下文不适用。
+//
+// 分档而非线性:<1MB 保持 base(覆盖 99% 流量,卡死检测不变慢);1~2MB 至少 60s;≥2MB 至少 90s。
+func firstOutputTimeoutForBody(base time.Duration, bodyBytes int) time.Duration {
+	if base <= 0 {
+		return base
+	}
+	switch {
+	case bodyBytes >= 2<<20:
+		return max(base, 90*time.Second)
+	case bodyBytes >= 1<<20:
+		return max(base, 60*time.Second)
+	}
+	return base
+}
+
 func handleStreamResponseWithOptions(logger *slog.Logger, resp *http.Response, w http.ResponseWriter, start time.Time, reqServiceTier string, options streamResponseOptions) (sdk.ForwardOutcome, error) {
 	return handleStreamResponseWithKeepAliveOptions(logger, resp, w, start, reqServiceTier, responseStreamKeepAliveInterval, options)
 }
