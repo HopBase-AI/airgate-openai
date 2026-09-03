@@ -376,6 +376,22 @@ gateway:
       long_context_input_multiplier: 2
       long_context_output_multiplier: 1.5
       long_context_cached_multiplier: 2
+    - id: gpt-6-astra
+      name: GPT-6 Astra
+      context_window: 1050000
+      max_output_tokens: 128000
+      capabilities:
+        - chat
+        - reasoning
+      input_price: 10
+      output_price: 50
+      cached_input_price: 1
+      input_price_priority: 20
+      output_price_priority: 100
+      cached_input_price_priority: 2
+      input_price_flex: 5
+      output_price_flex: 25
+      cached_input_price_flex: 0.5
     - id: gpt-image-1
       name: GPT Image 1
       context_window: 32000
