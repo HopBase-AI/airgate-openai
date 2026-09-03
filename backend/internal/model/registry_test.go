@@ -348,6 +348,46 @@ func TestCatalogOverlay_NewModelWithoutStandardKeepsInferred(t *testing.T) {
 	}
 }
 
+// TestBuiltinGPT6Astra 锁定 GPT-6 Astra 的内置价(2026-09-03 发布日新闻稿口径:$10/$50,
+// Fast ×2;官方牌价页出行后须回核)与关键字兜底:任何未注册的 gpt-6* 变体都按 Astra 价计,
+// 不得掉进 gpt-5.4 兜底少收 4 倍。
+func TestBuiltinGPT6Astra(t *testing.T) {
+	ResetCatalogOverlay()
+	spec, ok := registry["gpt-6-astra"]
+	if !ok {
+		t.Fatal("gpt-6-astra 应在内置注册表")
+	}
+	if spec.InputPrice != 10 || spec.CachedPrice != 1 || spec.OutputPrice != 50 {
+		t.Fatalf("gpt-6-astra 标准价 = %v/%v/%v, want 10/1/50", spec.InputPrice, spec.CachedPrice, spec.OutputPrice)
+	}
+	if spec.InputPricePriority != 20 || spec.CachedPricePriority != 2 || spec.OutputPricePriority != 100 {
+		t.Fatalf("gpt-6-astra Fast 档应为标准×2 (20/2/100), got %v/%v/%v",
+			spec.InputPricePriority, spec.CachedPricePriority, spec.OutputPricePriority)
+	}
+	if spec.InputPriceFlex != 5 || spec.CachedPriceFlex != 0.5 || spec.OutputPriceFlex != 25 {
+		t.Fatalf("gpt-6-astra Batch/Flex 档应为标准×0.5, got %v/%v/%v",
+			spec.InputPriceFlex, spec.CachedPriceFlex, spec.OutputPriceFlex)
+	}
+	if spec.LongContextThreshold != 0 || spec.LongContextInputMultiplier != 0 {
+		t.Fatalf("gpt-6-astra 官方未公布长上下文阶梯,不得启用: %+v", spec)
+	}
+	if spec.ContextWindow != 1050000 || spec.MaxOutputTokens != 128000 {
+		t.Fatalf("gpt-6-astra 上下文规格错误: %d/%d", spec.ContextWindow, spec.MaxOutputTokens)
+	}
+	if spec.ImageOnly || spec.OutputExcludesReasoning || spec.BillServerSideTools {
+		t.Fatalf("gpt-6-astra 不应带图像/xAI 口径标记: %+v", spec)
+	}
+	for _, id := range []string{"gpt-6-astra-2026-09-03", "gpt-6", "GPT-6-Astra-Pro", "gpt-6-codex", "gpt6-mini"} {
+		got := Lookup(id)
+		if got.InputPrice != 10 || got.OutputPrice != 50 {
+			t.Errorf("Lookup(%q) 应按 Astra 价兜底, got %v/%v (%s)", id, got.InputPrice, got.OutputPrice, got.Name)
+		}
+	}
+	if got := Lookup("gpt-5.6-sol"); got.InputPrice == 10 {
+		t.Fatal("gpt-6 兜底不得波及 gpt-5.6")
+	}
+}
+
 // TestBuiltinGPT56Family 锁定 5.6 三档的内置价格与长上下文规则。
 func TestBuiltinGPT56Family(t *testing.T) {
 	ResetCatalogOverlay()

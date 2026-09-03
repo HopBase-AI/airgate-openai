@@ -226,6 +226,15 @@ func deepSeekFlash(name string) Spec {
 // 若将来需要插件声明此映射，可在 toModelInfo 中为对应模型设置
 // Metadata["scheduling_model"]，Core 会优先读取该元数据。
 var registry = map[string]Spec{
+	// ── GPT-6 Astra(2026-09-03 发布,分阶段放量:Daybreak 客户先行,ChatGPT 各档与 API/AWS「数日内」)──
+	// 型号 ID 与价格来源:发布日新闻稿转述(VentureBeat 2026-09-03):标准档 $10/$50、
+	// Fast 档 $20/$100(=标准×2,与 std() 惯例一致)、「缓存读写单独计价」。
+	// ⚠️ 截至 2026-09-04 官方 developers.openai.com 定价页仍无 gpt-6 行:
+	//   缓存读按 OpenAI 惯例取输入×10%;上下文窗口/最大输出官方未公布,先沿用 5.6 家族的
+	//   1.05M/128K;长上下文阶梯官方未公布,**不**启用(宁可不收阶梯也不虚构倍率)。
+	//   官方牌价页出行后必须回来逐项核对——gpt-5.6 错价事故的教训:官方价只认官方原文。
+	"gpt-6-astra": std("GPT-6 Astra", 1050000, 128000, 10.0, 1.0, 50.0),
+
 	// ── GPT-5.6 家族(2026-07-09 GA):三档同为 1.05M 上下文,>272K 输入整笔 ×2 in / ×1.5 out ──
 	// 官方价 2026-07-11 核实:Sol $5/$30、Terra $2.5/$15、Luna $1/$6,缓存读=输入×10%。
 	"gpt-5.6-sol":   withLongCtx(std("GPT 5.6 Sol", 1050000, 128000, 5.0, 0.5, 30.0)),
@@ -378,6 +387,10 @@ func fallbackByKeyword(id string, reg map[string]Spec) (Spec, bool) {
 		return reg["grok-imagine-image-2.0"], true
 	case strings.Contains(id, "grok"):
 		return reg["grok-4.6"], true
+	// gpt-6 系必须先于 codex/mini/gpt-5 判:未注册的 Astra 变体(快照名、-pro 等)掉进
+	// gpt-5.4 兜底价会少收 4 倍(Astra $10/$50 vs 5.4 $2.5/$15)。宁可略高也不能少收。
+	case strings.Contains(id, "gpt-6") || strings.HasPrefix(id, "gpt6"):
+		return reg["gpt-6-astra"], true
 	case strings.Contains(id, "codex"):
 		return reg["gpt-5.4"], true
 	case strings.Contains(id, "image"):
