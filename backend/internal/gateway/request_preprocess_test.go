@@ -49,7 +49,9 @@ func TestEnrichModelsResponse_AddsContextMetadata(t *testing.T) {
 	}
 }
 
-func TestPreprocessRequestBody_ContextGuardTrimsMessages(t *testing.T) {
+// 回归：网关不得裁剪 chat completions 的 messages。曾经的「26 条以上只留头 2 尾 24」
+// 守卫让 agent 长会话每轮静默丢中间上下文，并把 tool_calls/tool 配对切断后交给上游。
+func TestPreprocessRequestBody_KeepsAllChatMessages(t *testing.T) {
 	var b strings.Builder
 	b.WriteString(`{"model":"gpt-4o","messages":[`)
 	for i := 0; i < 120; i++ {
@@ -57,20 +59,22 @@ func TestPreprocessRequestBody_ContextGuardTrimsMessages(t *testing.T) {
 			b.WriteString(",")
 		}
 		role := "user"
-		if i == 0 {
+		switch {
+		case i == 0:
 			role = "system"
+		case i%2 == 0:
+			role = "assistant"
 		}
 		b.WriteString(`{"role":"` + role + `","content":"` + strings.Repeat("x", 8000) + `"}`)
 	}
 	b.WriteString(`]}`)
 
 	processed := preprocessRequestBody([]byte(b.String()), "gpt-4o", "/v1/chat/completions")
-	msgCount := gjson.GetBytes(processed, "messages.#").Int()
-	if msgCount > int64(contextGuardMaxTailMessages+2) {
-		t.Fatalf("messages count after trim = %d, want <= %d", msgCount, contextGuardMaxTailMessages+2)
+	if got := gjson.GetBytes(processed, "messages.#").Int(); got != 120 {
+		t.Fatalf("messages count after preprocess = %d, want 120 (no trimming)", got)
 	}
-	if msgCount >= 120 {
-		t.Fatalf("messages were not trimmed, got count=%d", msgCount)
+	if first := gjson.GetBytes(processed, "messages.1.role").String(); first != "user" {
+		t.Fatalf("messages[1].role = %q, want user (head must be intact)", first)
 	}
 }
 

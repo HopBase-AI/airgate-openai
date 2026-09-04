@@ -228,9 +228,13 @@ func upstreamModelID(requestModel string) string {
 //  1. model 同步（body 中的 model 与 core 传入的 model 对齐）
 //  2. data:image 输入保持原样（对齐 Codex，不在网关内重采样用户图片）
 //  3. 剔除客户端 previous_response_id（跨账号接续不可靠，会话接续由网关内部管理）
-//  4. 上下文守卫（/v1/chat/completions 超长 messages 裁剪）
-//  5. input 规范化（/v1/responses 的 string input → list，messages → input 转换）
-//  6. Responses API 强制禁用上游存储（store=false）
+//  4. input 规范化（/v1/responses 的 string input → list，messages → input 转换）
+//  5. Responses API 强制禁用上游存储（store=false）
+//
+// 注意：这里**不做** messages 裁剪。历史上曾有「超过 26 条只保留开头 2 条 system +
+// 末尾 24 条」的上下文守卫，会让 agent 长会话每轮静默丢失中间上下文，并把
+// tool_calls/tool 配对切断后交给上游（2026-09-04 GLM 5.3 客户 400 事故）。
+// 上下文长度由客户端与上游权威判定，网关不得替客户改写对话历史。
 func preprocessRequestBody(body []byte, model, reqPath string) []byte {
 	if len(body) == 0 {
 		return body
@@ -262,7 +266,6 @@ func preprocessRequestBody(body []byte, model, reqPath string) []byte {
 	// 会话接续由网关内部的 session 机制（OAuth sessionState / Anthropic digestChain）管理。
 	result, _ = dropPreviousResponseIDFromJSON(result)
 
-	result = applyContextGuard(result, reqPath)
 	result = normalizeResponsesInput(result, reqPath)
 	result = forceResponsesStoreFalse(result, reqPath)
 	return result
