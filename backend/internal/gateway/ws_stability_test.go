@@ -252,21 +252,21 @@ func TestFailureOutcome529UsesShortRetry(t *testing.T) {
 	}
 }
 
-func TestFailureOutcome504IsAccountNeutralAndNotReplayable(t *testing.T) {
+func TestFailureOutcome504IsAccountNeutralAndFailoverable(t *testing.T) {
 	body := []byte(`{"error":{"message":"gateway timeout"}}`)
 	outcome := failureOutcome(http.StatusGatewayTimeout, body, http.Header{"Content-Type": []string{"application/json"}}, "gateway timeout", 0)
 
-	if outcome.Kind != sdk.OutcomeClientError {
-		t.Fatalf("Kind = %v, want ClientError", outcome.Kind)
+	if outcome.Kind != sdk.OutcomeUpstreamTransient {
+		t.Fatalf("Kind = %v, want UpstreamTransient", outcome.Kind)
 	}
 	if outcome.Upstream.StatusCode != http.StatusGatewayTimeout {
 		t.Fatalf("StatusCode = %d, want 504", outcome.Upstream.StatusCode)
 	}
-	if outcome.Kind.IsAccountFault() || outcome.Kind.ShouldFailover() {
-		t.Fatalf("504 verdict must be account-neutral and non-failover: %v", outcome.Kind)
+	if outcome.Kind.IsAccountFault() || !outcome.Kind.ShouldFailover() {
+		t.Fatalf("504 verdict must be account-neutral and failoverable: %v", outcome.Kind)
 	}
-	if err := forwardErrForOutcome(outcome, errors.New("upstream gateway timeout")); err != nil {
-		t.Fatalf("Core-facing error = %v, want nil passthrough", err)
+	if err := forwardErrForOutcome(outcome, errors.New("upstream gateway timeout")); err == nil {
+		t.Fatal("Core-facing error = nil, want upstream error for failover")
 	}
 }
 
