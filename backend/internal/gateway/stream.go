@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -742,6 +743,14 @@ func handleNonStreamResponseWithOptions(resp *http.Response, w http.ResponseWrit
 		reason := fmt.Sprintf("读取上游响应失败: %v", err)
 		return transientOutcome(reason), fmt.Errorf("%s", reason)
 	}
+	if problem, errorEnvelope := nonStreamJSONBodyProblem(resp, body); problem != "" {
+		if errorEnvelope {
+			outcome := failureOutcome(http.StatusBadGateway, body, resp.Header.Clone(), problem, 0)
+			outcome.Duration = time.Since(start)
+			return outcome, forwardErrForOutcome(outcome, fmt.Errorf("%s", problem))
+		}
+		return transientOutcome(problem), fmt.Errorf("%s", problem)
+	}
 	body = normalizeResponsesImageGenerationBody(body)
 	// 客户端可见字节先还原公开名;随后 parseUsage/bodyModel 也顺势回到公开名口径,
 	// restoreMappedUsageModel 仍作为计费侧兜底保留。
@@ -789,6 +798,49 @@ func handleNonStreamResponseWithOptions(resp *http.Response, w http.ResponseWrit
 		outcome.Upstream.Body = body
 	}
 	return outcome, nil
+}
+
+// nonStreamJSONBodyProblem 校验 2xx 非流式响应体是不是一份可信的成功响应。
+//
+// 中继 / 前置代理在故障时常以 200 回空体、HTML 占位页、`{"error":...}` 或被截断的 JSON
+// (2026-09-06 生产矩阵实测:四类"200 空壳"全被原样透传,客户端拿到无法解析的响应,
+// 网关既不换号也不记错——上游故障被"洗白"成成功)。只对 JSON 契约的接口校验,
+// 音频等二进制响应接口不在此列。返回 (问题描述, 是否为错误信封);无问题返回空串。
+// 错误信封走 failureOutcome 按文案分类(欠费判死信等),其余一律瞬时故障交 core 换号。
+func nonStreamJSONBodyProblem(resp *http.Response, body []byte) (string, bool) {
+	if resp == nil || resp.Request == nil || resp.Request.URL == nil || !expectsJSONResponsePath(resp.Request.URL.Path) {
+		return "", false
+	}
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 {
+		return "上游以 2xx 返回空响应体", false
+	}
+	if !gjson.ValidBytes(trimmed) {
+		return "上游以 2xx 返回非 JSON 响应体: " + truncate(string(trimmed), 120), false
+	}
+	errField := gjson.GetBytes(trimmed, "error")
+	if !errField.Exists() || errField.Type == gjson.Null || errField.Raw == "{}" || errField.Raw == `""` {
+		return "", false
+	}
+	message := errField.Get("message").String()
+	if message == "" {
+		message = truncate(errField.Raw, 160)
+	}
+	return "上游以 2xx 返回错误体: " + message, true
+}
+
+// expectsJSONResponsePath 判定该上游路径的成功响应必须是 JSON。
+func expectsJSONResponsePath(path string) bool {
+	if query := strings.IndexByte(path, '?'); query >= 0 {
+		path = path[:query]
+	}
+	path = strings.TrimRight(path, "/")
+	for _, suffix := range []string{"/chat/completions", "/completions", "/responses", "/embeddings", "/moderations", "/messages"} {
+		if strings.HasSuffix(path, suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 // ParseSSEStream 从 SSE 流中解析事件，通过 handler 回调输出，返回统一的 WSResult
