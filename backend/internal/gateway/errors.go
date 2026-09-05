@@ -34,9 +34,6 @@ func classifyHTTPFailure(statusCode int, message string) sdk.OutcomeKind {
 	// A gateway timeout has an unknown execution result and must not be replayed
 	// against another account. OutcomeClientError is the SDK's current
 	// account-neutral, non-failover passthrough verdict.
-	if statusCode == http.StatusGatewayTimeout {
-		return sdk.OutcomeClientError
-	}
 	// Specific rate-limit wording wins over overload prose. Structured error
 	// codes/types are handled separately by classifyHTTPFailureBody, where the
 	// machine-readable signal has priority over this message fallback.
