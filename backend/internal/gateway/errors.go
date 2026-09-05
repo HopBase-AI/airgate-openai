@@ -26,11 +26,18 @@ import (
 //	400 + 消息含 disabled/deactivated → AccountDead
 //	非 429 的 4xx/5xx + 计费失效文案（account is not active / check your billing）→ AccountDead
 //	  （中转常把欠费包在 5xx 里，判 Transient 会反复降级-恢复来回抖）
-//	504 → ClientError（SDK 暂无账号中性的不可重放 5xx，借此保留原始 504）
+//	504 → UpstreamTransient（网关超时必须允许切换账号）
 //	529 / 明确 overload 的 5xx → UpstreamTransient（短暂上游容量故障，不处罚账号）
 //	其它 5xx → UpstreamTransient
 //	其它 4xx → ClientError（客户端请求自己的问题，账号无辜）
 func classifyHTTPFailure(statusCode int, message string) sdk.OutcomeKind {
+	// A 504 is emitted by a gateway/upstream, never by the caller's payload.
+	// Always keep it account-neutral and retryable: relays often include
+	// misleading text (including conversation or billing wording) in the body.
+	// This check intentionally precedes all message-based classifiers.
+	if statusCode == http.StatusGatewayTimeout {
+		return sdk.OutcomeUpstreamTransient
+	}
 	// A gateway timeout has an unknown execution result and must not be replayed
 	// against another account. OutcomeClientError is the SDK's current
 	// account-neutral, non-failover passthrough verdict.
@@ -93,11 +100,12 @@ func classifyAnthropicBody(statusCode int, body []byte) sdk.OutcomeKind {
 // overload inside HTTP 429, while real credential limits may mention an
 // overloaded model in their human-readable message.
 func classifyHTTPFailureBody(statusCode int, body []byte, fallback string) sdk.OutcomeKind {
-	if statusCode != http.StatusGatewayTimeout {
-		for _, path := range []string{"error.code", "response.error.code", "code", "error.type", "response.error.type", "type"} {
-			if kind, ok := classifyStructuredHTTPFailure(statusCode, gjson.GetBytes(body, path).String()); ok {
-				return kind
-			}
+	if statusCode == http.StatusGatewayTimeout {
+		return sdk.OutcomeUpstreamTransient
+	}
+	for _, path := range []string{"error.code", "response.error.code", "code", "error.type", "response.error.type", "type"} {
+		if kind, ok := classifyStructuredHTTPFailure(statusCode, gjson.GetBytes(body, path).String()); ok {
+			return kind
 		}
 	}
 	return classifyHTTPFailure(statusCode, failureClassificationText(body, fallback))

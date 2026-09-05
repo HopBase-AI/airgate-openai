@@ -153,6 +153,7 @@ func TestClassifyHTTPFailureProductionErrorMatrix(t *testing.T) {
 		{"429 billing wording keeps rate limit", 429, "Your account is not active, please check your billing details on our website.", sdk.OutcomeAccountRateLimited},
 		{"529 provider overload", 529, "overloaded", sdk.OutcomeUpstreamTransient},
 		{"504 upstream timeout is failoverable", 504, "server_is_overloaded", sdk.OutcomeUpstreamTransient},
+		{"504 misleading conversation text remains failoverable", 504, "No tool call found for function call output", sdk.OutcomeUpstreamTransient},
 		{"400 invalid request", 400, "invalid request payload", sdk.OutcomeClientError},
 		{"404 model unavailable", 404, "model_not_found", sdk.OutcomeClientError},
 		{"419 nonstandard client response", 419, "session expired", sdk.OutcomeClientError},
