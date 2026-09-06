@@ -18,6 +18,17 @@ const imageKeepAliveInterval = 30 * time.Second
 // Cloudflare proxy read timeout without exposing account-specific SSE events.
 const responseStreamKeepAliveInterval = 10 * time.Second
 
+// streamFirstByteKeepAliveInterval 是「已收下流式请求、但上游响应头还没回来」这段
+// 空窗的心跳间隔。此前只有 images 端点在这段空窗发心跳,chat/responses 的流式请求
+// 在等待期间对客户端一个字节都不发——大图入参(2048x2048 PNG ≈ 9000 input tokens)
+// 上游预填要 70~160 秒,客户端 60 秒读超时先行放弃,表现为「空响应 / 连接被关闭」
+// (2026-09-06 客户实测:8 笔 499 全部卡在 57~60 秒,bytes_out=-1 即我方零字节)。
+//
+// 取 25 秒:大于生产首字 p95(约 21 秒)因此绝大多数请求根本不会发出心跳、行为不变;
+// 又小于常见的 30 秒读超时,足以把长预填请求托住。心跳是协议中立的 SSE 注释,
+// core 的 streamApplicationResponseCommitted 不把它当业务数据,换号兜底仍然可用。
+const streamFirstByteKeepAliveInterval = 25 * time.Second
+
 const responseStreamKeepAliveComment = ": hopbase-keepalive\n\n"
 
 type ssePingKeepAlive struct {
