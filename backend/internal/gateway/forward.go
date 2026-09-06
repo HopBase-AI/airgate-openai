@@ -564,9 +564,15 @@ func (g *OpenAIGateway) forwardAPIKey(ctx context.Context, req *sdk.ForwardReque
 		}
 	}
 
+	// 等上游响应头这段空窗的心跳。images 沿用 30s;chat/responses 的流式请求同样需要,
+	// 否则大图等长预填期间我方零字节输出,客户端读超时先掐(见 keepalive.go 常量注释)。
 	var sseKA *ssePingKeepAlive
-	if isImagesRequest(reqPath) && req.Stream {
-		sseKA = startSSEPingKeepAlive(req.Writer, func(error) { requestCancel() })
+	if req.Stream && req.Writer != nil {
+		if isImagesRequest(reqPath) {
+			sseKA = startSSEPingKeepAlive(req.Writer, func(error) { requestCancel() })
+		} else {
+			sseKA = startSSEPingKeepAliveWithInterval(req.Writer, streamFirstByteKeepAliveInterval, func(error) { requestCancel() })
+		}
 	}
 
 	logger.Debug("upstream_request_start",
@@ -622,6 +628,8 @@ func (g *OpenAIGateway) forwardAPIKey(ctx context.Context, req *sdk.ForwardReque
 			if downstreamErr := stopSSEPingKeepAlive(sseKA); downstreamErr != nil {
 				return streamAbortedOutcome(downstreamErr, nil, dur), nil
 			}
+		}
+		if sseKA != nil && isImagesRequest(reqPath) {
 			logger.Warn("images_apikey_upstream_error_redacted",
 				sdk.LogFieldPath, reqPath,
 				sdk.LogFieldModel, req.Model,
@@ -728,6 +736,13 @@ func (g *OpenAIGateway) forwardAPIKey(ctx context.Context, req *sdk.ForwardReque
 	}
 
 	if req.Stream && req.Writer != nil {
+		// 交给流式处理器前先停掉空窗心跳:它与 handleStreamResponse 自己的注释心跳
+		// 写同一个 writer,并存会竞争。停不掉说明客户端已经断开。
+		if sseKA != nil {
+			if downstreamErr := stopSSEPingKeepAlive(sseKA); downstreamErr != nil {
+				return streamAbortedOutcome(downstreamErr, nil, time.Since(start)), nil
+			}
+		}
 		options := streamResponseOptions{
 			suppressChatUsage: chatStream && !clientWantsChatStreamUsage,
 			publicModel:       mappedPublicModel,
