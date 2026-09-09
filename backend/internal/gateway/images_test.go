@@ -602,7 +602,7 @@ func TestNormalizeImagesResponseModelAliasesPreservesRequestedPublicID(t *testin
 		t.Run(fallbackModel, func(t *testing.T) {
 			for _, upstreamModel := range []string{yhshuGPTImage2UpstreamModel, "gpt-image-2"} {
 				body := []byte(fmt.Sprintf(`{"model":%q,"data":[{"model":%q,"b64_json":"AA=="}]}`, upstreamModel, upstreamModel))
-				normalized := normalizeImagesResponseModelAliases(body, fallbackModel)
+				normalized := normalizeImagesResponseModelAliases(body, fallbackModel, "")
 				if got := gjson.GetBytes(normalized, "model").String(); got != fallbackModel {
 					t.Fatalf("upstream=%q root model = %q, want %q; body=%s", upstreamModel, got, fallbackModel, normalized)
 				}

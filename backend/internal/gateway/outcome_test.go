@@ -74,7 +74,7 @@ func TestImagePublicModelIDCollapsesRelayAliases(t *testing.T) {
 		{"whatever-model", "gpt-5.5", "whatever-model"},
 	}
 	for _, c := range cases {
-		if got := imagePublicModelID(c.responseModel, c.fallbackModel); got != c.want {
+		if got := imagePublicModelID(c.responseModel, c.fallbackModel, ""); got != c.want {
 			t.Errorf("imagePublicModelID(%q, %q) = %q, want %q", c.responseModel, c.fallbackModel, got, c.want)
 		}
 	}
