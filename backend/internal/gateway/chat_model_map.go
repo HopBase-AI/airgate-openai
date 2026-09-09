@@ -5,9 +5,10 @@ import (
 	"log/slog"
 	"strings"
 
-	sdk "github.com/DouDOU-start/airgate-sdk/sdkgo"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
+
+	sdk "github.com/DouDOU-start/airgate-sdk/sdkgo"
 )
 
 // chatModelMapCredential 账号级「公开模型名 → 上游模型 ID」映射。
@@ -27,7 +28,15 @@ const chatModelMapCredential = "chat_model_map"
 // chatUpstreamModelForAccount 返回该账号下公开模型对应的上游模型 ID。
 // 未配置映射、JSON 非法或未命中时返回空串，调用方据此跳过重写。
 func chatUpstreamModelForAccount(account *sdk.Account, publicModel string) string {
-	raw := accountCredential(account, chatModelMapCredential)
+	return upstreamModelFromMapCredential(account, chatModelMapCredential, publicModel)
+}
+
+// upstreamModelFromMapCredential 解析账号凭证 credentialKey 里的 JSON 映射
+// （公开模型名 → 上游模型 ID），返回 publicModel 对应的上游 ID。
+// 未配置、JSON 非法、未命中或映射到自身时返回空串，调用方据此跳过重写。
+// chat_model_map 与 image_model_map 共用这一套解析与匹配规则。
+func upstreamModelFromMapCredential(account *sdk.Account, credentialKey, publicModel string) string {
+	raw := accountCredential(account, credentialKey)
 	if raw == "" {
 		return ""
 	}

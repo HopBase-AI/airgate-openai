@@ -63,8 +63,9 @@ func BuildPluginInfo() sdk.PluginInfo {
 				Fields: []sdk.CredentialField{
 					{Key: "api_key", Label: "API Key", Type: "password", Required: true, Placeholder: "sk-..."},
 					{Key: "base_url", Label: "API 地址", Type: "text", Required: false, Placeholder: "https://api.openai.com"},
-					{Key: gptImage2UpstreamModelCredential, Label: "GPT Image 2 上游模型 ID", Type: "text", Required: false, Placeholder: "留空时保持 gpt-image-2；特殊上游可填写专用模型 ID"},
-					{Key: imagesPathPrefixCredential, Label: "图像端点路径前缀", Type: "text", Required: false, Placeholder: "可选；非标图像中转的路径前缀，生成/编辑分别拼 /generations、/edits，例如 /v1/content/models/canvas-20"},
+					{Key: gptImage2UpstreamModelCredential, Label: "GPT Image 2 上游模型 ID", Type: "text", Required: false, Placeholder: "留空时保持 gpt-image-2；特殊上游可填写专用模型 ID（仅对 gpt-image-2 生效，多模型请用「图像模型 ID 映射」）"},
+					{Key: imageModelMapCredential, Label: "图像模型 ID 映射", Type: "text", Required: false, Placeholder: `可选；JSON 对象，公开图像模型名→该上游真实 ID，对任意图像模型生效且优先于「GPT Image 2 上游模型 ID」，例如 {"gpt-image-2.5-flare":"MM-H3-sft-Mlogic-High-25-image"}`},
+					{Key: imagesPathPrefixCredential, Label: "图像端点路径前缀", Type: "text", Required: false, Placeholder: "可选；非标图像中转的路径前缀，生成/编辑分别拼 /generations、/edits，例如 /v1/content/models/canvas-20；可用 {model} 占位按映射后的上游模型 ID 替换，如 /v1/content/models/{model}"},
 					{Key: imagesAsyncCredential, Label: "图像异步任务模式", Type: "text", Required: false, Placeholder: "可选；填 true 时图像请求走 X-Async 提交 + 任务轮询（MiniMax canvas-20 契约）"},
 					{Key: geminiImageProtocolCredential, Label: "Gemini 生图协议", Type: "text", Required: false, Placeholder: "默认 chat_completions；纯 Images API 上游填 images_api"},
 					{Key: chatModelMapCredential, Label: "对话模型 ID 映射", Type: "text", Required: false, Placeholder: `可选；JSON 对象，公开模型名→该上游真实 ID，例如 {"deepseek-v4-pro-202606":"deepseek-v4-pro-ga-260813"}`},

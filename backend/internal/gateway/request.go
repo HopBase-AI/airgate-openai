@@ -172,14 +172,27 @@ func extractForwardedPath(headers http.Header) string {
 // buildAPIKeyURL 根据账号 base_url 和请求路径构建上游 URL
 // imagesPathPrefixCredential 图像端点路径前缀覆盖：部分中转（如 MiniMax canvas-20）
 // 把 Images API 挂在模型专属路径下，生成/编辑分别为 <prefix>/generations、<prefix>/edits。
+// 前缀可含 {model} 占位符（imagesPathModelPlaceholder），按解析后的上游模型 ID 替换，
+// 让一个账号同时服务多个图像模型：/v1/content/models/{model} + image_model_map。
 const imagesPathPrefixCredential = "images_path_prefix"
+
+// imagesPathModelPlaceholder images_path_prefix 里的上游模型 ID 占位符。
+const imagesPathModelPlaceholder = "{model}"
 
 // upstreamImagesPath 按账号凭证覆盖图像请求的上游路径；非图像请求或未配置时原样返回。
 // 只改出站 URL，不改 reqPath 本身——响应分流、计费判定仍按客户侧原始路径。
-func upstreamImagesPath(account *sdk.Account, reqPath string) string {
+//
+// upstreamModel 是本次请求解析后的上游模型 ID（imageUpstreamModelIDForAccount），只用于
+// 替换前缀里的 {model}；为空时占位符原样保留，上游会 404，日志里的 URL 能直接看出是
+// 模型未解析而不是别的故障。不含占位符的前缀行为与此前完全一致。
+// 模型 ID 原样拼进路径不做转义：值由后台配置，MiniMax 一类 ID 只含 [A-Za-z0-9-]。
+func upstreamImagesPath(account *sdk.Account, reqPath, upstreamModel string) string {
 	prefix := accountCredential(account, imagesPathPrefixCredential)
 	if prefix == "" || !isImagesRequest(reqPath) {
 		return reqPath
+	}
+	if upstreamModel = strings.TrimSpace(upstreamModel); upstreamModel != "" {
+		prefix = strings.ReplaceAll(prefix, imagesPathModelPlaceholder, upstreamModel)
 	}
 	prefix = "/" + strings.Trim(prefix, "/")
 	if strings.HasSuffix(reqPath, "/images/edits") {

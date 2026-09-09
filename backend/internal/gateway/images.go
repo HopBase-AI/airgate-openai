@@ -189,9 +189,12 @@ func estimateImageCountFromTokens(outputTokens int) int {
 // imagesRequest 归一化后的 Images API 请求（同时承载 /generations 与 /edits）。
 // /generations 只需要 Prompt；/edits 额外携带 Images（参考图）与可选 Mask（inpainting 掩膜）。
 type imagesRequest struct {
-	IsEdit        bool
-	Prompt        string
-	Model         string
+	IsEdit bool
+	Prompt string
+	Model  string
+	// UpstreamModel 做过账号级映射（image_model_map / gpt_image_2_upstream_model）时
+	// 实际发往上游的模型 ID；空=未映射。响应侧据此把模型名还原为公开名。
+	UpstreamModel string
 	N             int
 	Size          string
 	Resolution    string // xAI Grok Imagine 分辨率档（1k/2k），按张计费模型的计费维度
@@ -1787,9 +1790,10 @@ func (g *OpenAIGateway) handleImagesResponse(resp *http.Response, w http.Respons
 
 // normalizeImagesResponseModelAliases keeps relay-only model IDs out of the
 // public response. Usage attribution uses the same public alias below.
-func normalizeImagesResponseModelAliases(body []byte, fallbackModel string) []byte {
+// mappedUpstreamModel 是本次请求实际发往上游的模型 ID（空=未做映射），见 imagePublicModelID。
+func normalizeImagesResponseModelAliases(body []byte, fallbackModel, mappedUpstreamModel string) []byte {
 	responseModel := strings.TrimSpace(gjson.GetBytes(body, "model").String())
-	if publicModel := imagePublicModelID(responseModel, fallbackModel); publicModel != "" && publicModel != responseModel {
+	if publicModel := imagePublicModelID(responseModel, fallbackModel, mappedUpstreamModel); publicModel != "" && publicModel != responseModel {
 		if patched, err := sjsonSetBytes(body, "model", publicModel); err == nil {
 			body = patched
 		}
@@ -1797,7 +1801,7 @@ func normalizeImagesResponseModelAliases(body []byte, fallbackModel string) []by
 
 	for index, item := range gjson.GetBytes(body, "data").Array() {
 		itemModel := strings.TrimSpace(item.Get("model").String())
-		publicModel := imagePublicModelID(itemModel, fallbackModel)
+		publicModel := imagePublicModelID(itemModel, fallbackModel, mappedUpstreamModel)
 		if publicModel == "" || publicModel == itemModel {
 			continue
 		}
@@ -1822,7 +1826,11 @@ func handleImagesResponseWithLogger(logger *slog.Logger, resp *http.Response, w 
 		}
 		return transientOutcome(reason), fmt.Errorf("%s", reason)
 	}
-	body = normalizeImagesResponseModelAliases(body, fallbackModel)
+	mappedUpstreamModel := ""
+	if imgReq != nil {
+		mappedUpstreamModel = imgReq.UpstreamModel
+	}
+	body = normalizeImagesResponseModelAliases(body, fallbackModel, mappedUpstreamModel)
 
 	parsed := parseUsage(body)
 	headers := resp.Header.Clone()
@@ -1831,7 +1839,7 @@ func handleImagesResponseWithLogger(logger *slog.Logger, resp *http.Response, w 
 	if modelName == "" {
 		modelName = fallbackModel
 	}
-	modelName = imagePublicModelID(modelName, fallbackModel)
+	modelName = imagePublicModelID(modelName, fallbackModel, mappedUpstreamModel)
 
 	numImages := countUsableImages(body)
 	if logger == nil {

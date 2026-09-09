@@ -437,6 +437,36 @@ gateway:
       input_price_flex: 2.5
       output_price_flex: 15
       cached_input_price_flex: 0.25
+    - id: gpt-image-2.5-flare
+      name: GPT Image 2.5 Flare
+      context_window: 32000
+      max_output_tokens: 0
+      capabilities:
+        - image_generation
+      input_price: 5
+      output_price: 30
+      cached_input_price: 1.25
+      input_price_priority: 10
+      output_price_priority: 60
+      cached_input_price_priority: 2.5
+      input_price_flex: 2.5
+      output_price_flex: 15
+      cached_input_price_flex: 0.625
+    - id: gpt-image-2.5-sunburst
+      name: GPT Image 2.5 Sunburst
+      context_window: 32000
+      max_output_tokens: 0
+      capabilities:
+        - image_generation
+      input_price: 5
+      output_price: 30
+      cached_input_price: 1.25
+      input_price_priority: 10
+      output_price_priority: 60
+      cached_input_price_priority: 2.5
+      input_price_flex: 2.5
+      output_price_flex: 15
+      cached_input_price_flex: 0.625
     - id: grok-4.20-0309-reasoning
       name: Grok 4.20 Reasoning
       context_window: 2000000
@@ -571,12 +601,17 @@ gateway:
           label: GPT Image 2 上游模型 ID
           type: text
           required: false
-          placeholder: 留空时保持 gpt-image-2；特殊上游可填写专用模型 ID
+          placeholder: 留空时保持 gpt-image-2；特殊上游可填写专用模型 ID（仅对 gpt-image-2 生效，多模型请用「图像模型 ID 映射」）
+        - key: image_model_map
+          label: 图像模型 ID 映射
+          type: text
+          required: false
+          placeholder: 可选；JSON 对象，公开图像模型名→该上游真实 ID，对任意图像模型生效且优先于「GPT Image 2 上游模型 ID」，例如 {"gpt-image-2.5-flare":"MM-H3-sft-Mlogic-High-25-image"}
         - key: images_path_prefix
           label: 图像端点路径前缀
           type: text
           required: false
-          placeholder: 可选；非标图像中转的路径前缀，生成/编辑分别拼 /generations、/edits，例如 /v1/content/models/canvas-20
+          placeholder: 可选；非标图像中转的路径前缀，生成/编辑分别拼 /generations、/edits，例如 /v1/content/models/canvas-20；可用 {model} 占位按映射后的上游模型 ID 替换，如 /v1/content/models/{model}
         - key: images_async
           label: 图像异步任务模式
           type: text

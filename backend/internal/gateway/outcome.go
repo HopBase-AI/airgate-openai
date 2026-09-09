@@ -1030,12 +1030,18 @@ const (
 )
 
 // imageUpstreamModelIDForAccount applies provider-specific aliases only after
-// Core has selected the upstream account. An explicit credential override wins
-// because OpenAI-compatible relays do not share one naming convention. yhshu.ai
-// keeps its legacy automatic alias; every other provider receives the public
-// model ID unless its account explicitly configures an override.
+// Core has selected the upstream account. OpenAI-compatible relays do not share
+// one naming convention, so explicit account configuration always wins:
+//  1. image_model_map hit — per-model JSON mapping, works for any image model;
+//  2. legacy gpt_image_2_upstream_model — gpt-image-2 family only, kept for
+//     accounts configured before image_model_map existed;
+//  3. yhshu.ai legacy automatic alias;
+//  4. otherwise the public model ID is forwarded unchanged.
 func imageUpstreamModelIDForAccount(account *sdk.Account, modelID string) string {
 	modelID = strings.TrimSpace(modelID)
+	if mapped := imageModelMapUpstreamForAccount(account, modelID); mapped != "" {
+		return mapped
+	}
 	if isGPTImage2PublicModel(modelID) {
 		if configured := accountCredential(account, gptImage2UpstreamModelCredential); configured != "" {
 			return configured
@@ -1084,15 +1090,19 @@ func accountBaseURLHost(account *sdk.Account) string {
 }
 
 // imagePublicModelID 把上游响应回填的模型名还原成客户侧公开 ID。
-// 请求侧已确认是 gpt-image-2 公开模型时，响应一律还原成公开名：中转上游会以
-// 自家别名回填 model 字段（yhshu 的 gpt-image-2-124k、MiniMax 的 canvas-20 等），
-// 逐别名维护白名单跟不上接入速度——漏一个就是别名泄漏给客户端 + 注册表查不到价
-// 静默错档计费（关键字兜底 DefaultSpec）。非 gpt-image-2 请求保持原样透传。
-func imagePublicModelID(responseModel, fallbackModel string) string {
+// 以下两种请求的响应一律还原成 fallbackModel（请求侧公开名）：
+//   - gpt-image-2 公开模型：中转上游会以自家别名回填 model 字段（yhshu 的
+//     gpt-image-2-124k、MiniMax 的 canvas-20 等），逐别名维护白名单跟不上接入速度
+//     ——漏一个就是别名泄漏给客户端 + 注册表查不到价静默错档计费（关键字兜底）。
+//   - 做过 image_model_map 映射的任意图像模型（mappedUpstreamModel 非空且 ≠ 公开名）：
+//     同理，上游回显什么都不可信，按请求侧公开名计费与回显。
+//
+// 其余请求保持原样透传。
+func imagePublicModelID(responseModel, fallbackModel, mappedUpstreamModel string) string {
 	responseModel = strings.TrimSpace(responseModel)
 	fallbackModel = strings.TrimSpace(fallbackModel)
-	if !isGPTImage2PublicModel(fallbackModel) {
-		return responseModel
+	if isGPTImage2PublicModel(fallbackModel) || imageModelWasMapped(fallbackModel, mappedUpstreamModel) {
+		return fallbackModel
 	}
-	return fallbackModel
+	return responseModel
 }

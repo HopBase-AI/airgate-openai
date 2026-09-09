@@ -284,7 +284,9 @@ func (g *OpenAIGateway) forwardAPIKey(ctx context.Context, req *sdk.ForwardReque
 	if isGeminiImageChatRequest(req, reqMethod, reqPath) {
 		return g.forwardAPIKeyGeminiImageChat(ctx, req, reqServiceTier, start)
 	}
-	targetURL := buildAPIKeyURL(account, upstreamImagesPath(account, reqPath))
+	// 图像请求的上游路径（images_path_prefix）可含 {model} 占位符，须等账号级模型
+	// 映射解析完再拼最终 URL（见下方 images 块末尾）；非图像请求这里就是最终 URL。
+	targetURL := buildAPIKeyURL(account, reqPath)
 	// vLLM 系与多数中继的 Chat 流只有收到 include_usage 才返回计费 token
 	// （标准 OpenAI 语义；历史上只对 TokenHub DeepSeek Flash 特判，TokenForge
 	// kimi-k3 实测同病：客户端不带 include_usage 就零 usage 落库=漏计费）。
@@ -442,6 +444,9 @@ func (g *OpenAIGateway) forwardAPIKey(ctx context.Context, req *sdk.ForwardReque
 		}
 		req.Body = body
 		parsedImages.Model = imagesUpstreamModel
+		// 响应侧据此把上游回显（或缺失）的模型名还原为公开名，计费与客户可见字段
+		// 都不能落上游 ID。
+		parsedImages.UpstreamModel = imagesUpstreamModel
 		if contentType != "" {
 			req.Headers.Set("Content-Type", contentType)
 		}
@@ -451,6 +456,15 @@ func (g *OpenAIGateway) forwardAPIKey(ctx context.Context, req *sdk.ForwardReque
 			"size", parsedImages.Size,
 			"path", reqPath,
 		)
+	}
+	if isImagesRequest(reqPath) {
+		// images_path_prefix 的 {model} 占位按解析后的上游模型 ID 替换；空 body 没
+		// 解析出模型时按 req.Model 解析，保证占位符总能落到确定的 ID。
+		pathModel := imagesUpstreamModel
+		if pathModel == "" {
+			pathModel = imageUpstreamModelIDForAccount(account, req.Model)
+		}
+		targetURL = buildAPIKeyURL(account, upstreamImagesPath(account, reqPath, pathModel))
 	}
 
 	// 账号级「公开模型名 → 上游模型 ID」映射：同一模型在不同上游 ID 未必一致

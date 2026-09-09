@@ -254,6 +254,14 @@ var registry = map[string]Spec{
 	"gpt-image-1":   imgSpec("GPT Image 1"),
 	"gpt-image-1.5": imgSpec("GPT Image 1.5"),
 	"gpt-image-2":   imgSpec("GPT Image 2"),
+	// GPT Image 2.5 两档（OpenAI 官方牌价 2026-09-09 核，两档同价）：text input $5/M、
+	// cached input $1.25/M、image output $30/M。官方另列 image input $8/M，但 Images API
+	// 计费链路（fillUsageCostPerImageBySize）不拆文本/图片输入 token，与 gpt-image-2
+	// 同口径一律按 InputPrice 计。
+	// 必须显式注册：未注册会被 fallbackByKeyword 的 "image" 关键字兜到 gpt-image-1.5
+	// ——cached 价差 2.5 倍且只有一条告警日志可见，与 gpt-5.6 静默错价事故同型。
+	"gpt-image-2.5-flare":    pricedImageSpec("GPT Image 2.5 Flare", 5.0, 1.25, 30.0),
+	"gpt-image-2.5-sunburst": pricedImageSpec("GPT Image 2.5 Sunburst", 5.0, 1.25, 30.0),
 
 	// ── OpenAI-compatible Gemini image relays（Nano Banana 系列）──
 	// Azure Gemini 分组使用同一组官方模型基准价，再由 Core 套分组倍率。
