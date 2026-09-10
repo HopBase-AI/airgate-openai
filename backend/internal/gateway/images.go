@@ -51,7 +51,7 @@ const imagesPassthroughInstructions = "Use the user's image description and appe
 const maxResponsesInputImageBytes = 2 * 1024 * 1024
 const maxRemoteImageBytes = 25 * 1024 * 1024
 
-const sanitizedImageSSEErrorMessage = "请求暂时无法完成，请稍后重试"
+const sanitizedImageSSEErrorMessage = "the request could not be completed right now, please retry later"
 
 // 历史变量名保留，但实际对外提示保持统一的重试文案，不再暗示用户压缩图片。
 const imageTooLargeSSEErrorMessage = sanitizedImageSSEErrorMessage
@@ -294,28 +294,28 @@ func rewriteImagesRequestModel(body []byte, contentType, upstreamModel string) (
 	if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(contentType)), "multipart/") {
 		patched, patchErr := sjsonSetBytes(body, "model", upstreamModel)
 		if patchErr != nil {
-			return nil, "", fmt.Errorf("改写上游图片模型失败: %w", patchErr)
+			return nil, "", fmt.Errorf("failed to rewrite upstream image model: %w", patchErr)
 		}
 		return patched, contentType, nil
 	}
 	mediaType, params, err := mime.ParseMediaType(contentType)
 	if err != nil {
-		return nil, "", fmt.Errorf("multipart content-type 解析失败: %w", err)
+		return nil, "", fmt.Errorf("failed to parse multipart content-type: %w", err)
 	}
 	if !strings.EqualFold(mediaType, "multipart/form-data") {
-		return nil, "", fmt.Errorf("不支持的 multipart content-type: %s", mediaType)
+		return nil, "", fmt.Errorf("unsupported multipart content-type: %s", mediaType)
 	}
 
 	boundary := params["boundary"]
 	if boundary == "" {
-		return nil, "", fmt.Errorf("multipart content-type 缺少 boundary")
+		return nil, "", fmt.Errorf("multipart content-type is missing boundary")
 	}
 
 	reader := multipart.NewReader(bytes.NewReader(body), boundary)
 	var buf bytes.Buffer
 	writer := multipart.NewWriter(&buf)
 	if err := writer.SetBoundary(boundary); err != nil {
-		return nil, "", fmt.Errorf("multipart boundary 无效: %w", err)
+		return nil, "", fmt.Errorf("invalid multipart boundary: %w", err)
 	}
 
 	foundModel := false
@@ -325,7 +325,7 @@ func rewriteImagesRequestModel(body []byte, contentType, upstreamModel string) (
 			break
 		}
 		if nextErr != nil {
-			return nil, "", fmt.Errorf("multipart 读取失败: %w", nextErr)
+			return nil, "", fmt.Errorf("failed to read multipart body: %w", nextErr)
 		}
 
 		header := make(textproto.MIMEHeader, len(part.Header))
@@ -335,7 +335,7 @@ func rewriteImagesRequestModel(body []byte, contentType, upstreamModel string) (
 		data, readErr := io.ReadAll(part)
 		_ = part.Close()
 		if readErr != nil {
-			return nil, "", fmt.Errorf("multipart part %q 读取失败: %w", part.FormName(), readErr)
+			return nil, "", fmt.Errorf("failed to read multipart part %q: %w", part.FormName(), readErr)
 		}
 		if part.FormName() == "model" {
 			data = []byte(upstreamModel)
@@ -343,19 +343,19 @@ func rewriteImagesRequestModel(body []byte, contentType, upstreamModel string) (
 		}
 		dst, createErr := writer.CreatePart(header)
 		if createErr != nil {
-			return nil, "", fmt.Errorf("multipart part %q 重建失败: %w", part.FormName(), createErr)
+			return nil, "", fmt.Errorf("failed to rebuild multipart part %q: %w", part.FormName(), createErr)
 		}
 		if _, writeErr := dst.Write(data); writeErr != nil {
-			return nil, "", fmt.Errorf("multipart part %q 写入失败: %w", part.FormName(), writeErr)
+			return nil, "", fmt.Errorf("failed to write multipart part %q: %w", part.FormName(), writeErr)
 		}
 	}
 	if !foundModel {
 		if err := writer.WriteField("model", upstreamModel); err != nil {
-			return nil, "", fmt.Errorf("multipart model 写入失败: %w", err)
+			return nil, "", fmt.Errorf("failed to write multipart model field: %w", err)
 		}
 	}
 	if err := writer.Close(); err != nil {
-		return nil, "", fmt.Errorf("multipart 请求结束失败: %w", err)
+		return nil, "", fmt.Errorf("failed to finalize multipart request: %w", err)
 	}
 	return buf.Bytes(), contentType, nil
 }
@@ -387,19 +387,19 @@ func resizeMaskToImageSize(data []byte, mimeType string, width, height int) ([]b
 	}
 	cfg, _, err := image.DecodeConfig(bytes.NewReader(data))
 	if err != nil {
-		return nil, "", fmt.Errorf("读取 mask 尺寸失败: %w", err)
+		return nil, "", fmt.Errorf("failed to read mask dimensions: %w", err)
 	}
 	if cfg.Width == width && cfg.Height == height {
 		return data, mimeType, nil
 	}
 	mask, _, err := image.Decode(bytes.NewReader(data))
 	if err != nil {
-		return nil, "", fmt.Errorf("解码 mask 失败: %w", err)
+		return nil, "", fmt.Errorf("failed to decode mask: %w", err)
 	}
 	resized := resizeImageNearest(mask, width, height)
 	var buf bytes.Buffer
 	if err := png.Encode(&buf, resized); err != nil {
-		return nil, "", fmt.Errorf("编码缩放后的 mask 失败: %w", err)
+		return nil, "", fmt.Errorf("failed to encode resized mask: %w", err)
 	}
 	return buf.Bytes(), "image/png", nil
 }
@@ -433,7 +433,7 @@ func readImageRefBytes(ref string, shrinkLimit int) (string, []byte, error) {
 		}
 		return mimeType, data, nil
 	default:
-		return "", nil, fmt.Errorf("image 必须是 data URL 或 http(s) URL")
+		return "", nil, fmt.Errorf("image must be a data URL or an http(s) URL")
 	}
 }
 
@@ -441,26 +441,26 @@ func downloadImageBytes(ref string) ([]byte, string, error) {
 	client := newImageRefHTTPClient()
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, ref, nil)
 	if err != nil {
-		return nil, "", fmt.Errorf("构建图片下载请求失败: %w", err)
+		return nil, "", fmt.Errorf("failed to build image download request: %w", err)
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, "", fmt.Errorf("下载图片失败: %w", err)
+		return nil, "", fmt.Errorf("failed to download image: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, "", fmt.Errorf("下载图片返回 HTTP %d", resp.StatusCode)
+		return nil, "", fmt.Errorf("image download returned HTTP %d", resp.StatusCode)
 	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxRemoteImageBytes+1))
 	if err != nil {
-		return nil, "", fmt.Errorf("读取图片失败: %w", err)
+		return nil, "", fmt.Errorf("failed to read image: %w", err)
 	}
 	if len(data) > maxRemoteImageBytes {
-		return nil, "", fmt.Errorf("图片过大")
+		return nil, "", fmt.Errorf("image is too large")
 	}
 	mimeType := strings.TrimSpace(strings.Split(resp.Header.Get("Content-Type"), ";")[0])
 	if mimeType == "" || !strings.HasPrefix(strings.ToLower(mimeType), "image/") {
-		return nil, "", fmt.Errorf("图片 Content-Type 不是 image/*: %s", mimeType)
+		return nil, "", fmt.Errorf("image Content-Type is not image/*: %s", mimeType)
 	}
 	return data, strings.ToLower(mimeType), nil
 }
@@ -468,7 +468,7 @@ func downloadImageBytes(ref string) ([]byte, string, error) {
 func decodeDataImageURL(ref string) (string, []byte, error) {
 	comma := strings.IndexByte(ref, ',')
 	if comma < 0 || !strings.HasPrefix(strings.ToLower(ref[:comma]), "data:image/") {
-		return "", nil, fmt.Errorf("API key /v1/images/edits 仅支持 data URL 图片")
+		return "", nil, fmt.Errorf("/v1/images/edits with an API key only supports data URL images")
 	}
 	mimeType := ref[len("data:"):comma]
 	if semi := strings.IndexByte(mimeType, ';'); semi >= 0 {
@@ -476,7 +476,7 @@ func decodeDataImageURL(ref string) (string, []byte, error) {
 	}
 	data, err := base64.StdEncoding.DecodeString(ref[comma+1:])
 	if err != nil {
-		return "", nil, fmt.Errorf("图片 base64 解码失败: %w", err)
+		return "", nil, fmt.Errorf("failed to decode image base64: %w", err)
 	}
 	return strings.ToLower(mimeType), data, nil
 }
@@ -498,7 +498,7 @@ func parseImagesRequest(body []byte, contentType string, isEdit bool) (*imagesRe
 func parseImagesJSON(body []byte, isEdit bool) (*imagesRequest, error) {
 	prompt := strings.TrimSpace(gjson.GetBytes(body, "prompt").String())
 	if prompt == "" {
-		return nil, fmt.Errorf("prompt 不能为空")
+		return nil, fmt.Errorf("prompt must not be empty")
 	}
 	n := int(gjson.GetBytes(body, "n").Int())
 	if n <= 0 {
@@ -526,7 +526,7 @@ func parseImagesJSON(body []byte, isEdit bool) (*imagesRequest, error) {
 		if item.IsObject() {
 			s = strings.TrimSpace(item.Get("url").String())
 			if s == "" {
-				return "", fmt.Errorf("image 对象缺少 url 字段")
+				return "", fmt.Errorf("image object is missing the url field")
 			}
 		}
 		if s == "" {
@@ -562,7 +562,7 @@ func parseImagesJSON(body []byte, isEdit bool) (*imagesRequest, error) {
 		req.Mask = maskRef
 	}
 	if len(req.Images) == 0 {
-		return nil, fmt.Errorf("/v1/images/edits 需要至少一张 image")
+		return nil, fmt.Errorf("/v1/images/edits requires at least one image")
 	}
 	return req, nil
 }
@@ -585,13 +585,13 @@ func validatePerUnitImagesRequest(spec model.Spec, imgReq *imagesRequest) error 
 	// 价目档无关——基础版传 2k 上游照收、按平价计费(计费侧无 2k 价时自动回落
 	// 1k 档单价),不得按价目档收窄合法枚举(可选性审计教训:2026-08-25 曾误拦)。
 	if res := strings.ToLower(strings.TrimSpace(imgReq.Resolution)); res != "" && res != "1k" && res != "2k" {
-		return fmt.Errorf("resolution 仅支持 1k / 2k")
+		return fmt.Errorf("resolution must be 1k or 2k")
 	}
 	if imgReq.Mask != "" {
-		return fmt.Errorf("该模型不支持 mask 参数")
+		return fmt.Errorf("this model does not support the mask parameter")
 	}
 	if len(imgReq.Images) > perUnitImagesMaxInputImages {
-		return fmt.Errorf("该模型 /v1/images/edits 最多支持 %d 张输入图", perUnitImagesMaxInputImages)
+		return fmt.Errorf("this model supports at most %d input images on /v1/images/edits", perUnitImagesMaxInputImages)
 	}
 	return nil
 }
@@ -603,7 +603,7 @@ func validatePerUnitImagesRequest(spec model.Spec, imgReq *imagesRequest) error 
 // （图片已归一成 data URL，上游实测接受 data URL 输入）。
 func buildPerUnitImagesEditJSONBody(body []byte, contentType string, imgReq *imagesRequest) ([]byte, string, error) {
 	if imgReq == nil || len(imgReq.Images) == 0 {
-		return nil, "", fmt.Errorf("/v1/images/edits 需要至少一张 image")
+		return nil, "", fmt.Errorf("/v1/images/edits requires at least one image")
 	}
 	var imageValue any
 	if len(imgReq.Images) == 1 {
@@ -615,7 +615,7 @@ func buildPerUnitImagesEditJSONBody(body []byte, contentType string, imgReq *ima
 	if !isMultipart && len(body) > 0 {
 		patched, err := sjson.SetBytes(body, "image", imageValue)
 		if err != nil {
-			return nil, "", fmt.Errorf("改写 image 字段失败: %w", err)
+			return nil, "", fmt.Errorf("failed to rewrite image field: %w", err)
 		}
 		return patched, "application/json", nil
 	}
@@ -632,7 +632,7 @@ func buildPerUnitImagesEditJSONBody(body []byte, contentType string, imgReq *ima
 	}
 	out, err := json.Marshal(payload)
 	if err != nil {
-		return nil, "", fmt.Errorf("构造 edits 请求体失败: %w", err)
+		return nil, "", fmt.Errorf("failed to build edits request body: %w", err)
 	}
 	return out, "application/json", nil
 }
@@ -640,11 +640,11 @@ func buildPerUnitImagesEditJSONBody(body []byte, contentType string, imgReq *ima
 func parseImagesEditMultipart(body []byte, contentType string) (*imagesRequest, error) {
 	_, params, err := mime.ParseMediaType(contentType)
 	if err != nil {
-		return nil, fmt.Errorf("multipart content-type 解析失败: %w", err)
+		return nil, fmt.Errorf("failed to parse multipart content-type: %w", err)
 	}
 	boundary := params["boundary"]
 	if boundary == "" {
-		return nil, fmt.Errorf("multipart content-type 缺少 boundary")
+		return nil, fmt.Errorf("multipart content-type is missing boundary")
 	}
 	reader := multipart.NewReader(bytes.NewReader(body), boundary)
 	req := &imagesRequest{IsEdit: true, N: 1}
@@ -654,14 +654,14 @@ func parseImagesEditMultipart(body []byte, contentType string) (*imagesRequest, 
 			break
 		}
 		if err != nil {
-			return nil, fmt.Errorf("multipart 读取失败: %w", err)
+			return nil, fmt.Errorf("failed to read multipart body: %w", err)
 		}
 		name := part.FormName()
 		ctype := part.Header.Get("Content-Type")
 		data, readErr := io.ReadAll(part)
 		_ = part.Close()
 		if readErr != nil {
-			return nil, fmt.Errorf("读取 multipart part %q 失败: %w", name, readErr)
+			return nil, fmt.Errorf("failed to read multipart part %q: %w", name, readErr)
 		}
 		text := strings.TrimSpace(string(data))
 		switch name {
@@ -700,10 +700,10 @@ func parseImagesEditMultipart(body []byte, contentType string) (*imagesRequest, 
 		}
 	}
 	if req.Prompt == "" {
-		return nil, fmt.Errorf("prompt 不能为空")
+		return nil, fmt.Errorf("prompt must not be empty")
 	}
 	if len(req.Images) == 0 {
-		return nil, fmt.Errorf("/v1/images/edits 需要至少一张 image")
+		return nil, fmt.Errorf("/v1/images/edits requires at least one image")
 	}
 	return req, nil
 }
@@ -722,7 +722,7 @@ func multipartImageRef(contentType string, data []byte, text string) (string, er
 	if mainType == "" || mainType == "application/octet-stream" || strings.HasPrefix(mainType, "text/") {
 		return normalizeImageRef(text)
 	}
-	return "", fmt.Errorf("不支持的 multipart 图片 Content-Type: %s", contentType)
+	return "", fmt.Errorf("unsupported multipart image Content-Type: %s", contentType)
 }
 
 func normalizeImageRef(s string) (string, error) {
@@ -733,7 +733,7 @@ func normalizeImageRef(s string) (string, error) {
 	if strings.HasPrefix(s, "data:") {
 		return normalizeImageDataURL(s), nil
 	}
-	return "", fmt.Errorf("image 必须是 data URL 或 http(s) URL")
+	return "", fmt.Errorf("image must be a data URL or an http(s) URL")
 }
 
 func normalizeImageDataURL(s string) string {
@@ -886,27 +886,27 @@ func validateImageSize(size, model string) error {
 	}
 	width, height, ok := parseImageSize(s)
 	if !ok {
-		return fmt.Errorf("size 格式无效，应为 WIDTHxHEIGHT 或 auto")
+		return fmt.Errorf("size must be WIDTHxHEIGHT or auto")
 	}
 	if width > 3840 || height > 3840 {
-		return fmt.Errorf("size 边长超过 3840px (%dx%d)", width, height)
+		return fmt.Errorf("size side length exceeds 3840px (%dx%d)", width, height)
 	}
 	if width%16 != 0 || height%16 != 0 {
-		return fmt.Errorf("size 两边必须是 16 的倍数 (%dx%d)", width, height)
+		return fmt.Errorf("size width and height must be multiples of 16 (%dx%d)", width, height)
 	}
 	long, short := width, height
 	if short > long {
 		long, short = height, width
 	}
 	if long > short*3 {
-		return fmt.Errorf("size 长短边比例不能超过 3:1 (%dx%d)", width, height)
+		return fmt.Errorf("size aspect ratio must not exceed 3:1 (%dx%d)", width, height)
 	}
 	total := width * height
 	if total < 655360 {
-		return fmt.Errorf("size 总像素数不能少于 655360 (%dx%d=%d)", width, height, total)
+		return fmt.Errorf("size total pixel count must be at least 655360 (%dx%d=%d)", width, height, total)
 	}
 	if total > 8294400 {
-		return fmt.Errorf("size 总像素数不能超过 8294400 (%dx%d=%d)", width, height, total)
+		return fmt.Errorf("size total pixel count must not exceed 8294400 (%dx%d=%d)", width, height, total)
 	}
 	return nil
 }
@@ -921,11 +921,11 @@ func buildEditRegionAnnotation(req *imagesRequest) (string, error) {
 	}
 	base, err := decodeImageRefImage(req.Images[0])
 	if err != nil {
-		return "", fmt.Errorf("解码编辑目标图片失败: %w", err)
+		return "", fmt.Errorf("failed to decode edit target image: %w", err)
 	}
 	mask, err := decodeImageRefImage(req.Mask)
 	if err != nil {
-		return "", fmt.Errorf("解码编辑 mask 失败: %w", err)
+		return "", fmt.Errorf("failed to decode edit mask: %w", err)
 	}
 	if base == nil {
 		base = whiteCanvas(mask.Bounds().Dx(), mask.Bounds().Dy())
@@ -936,7 +936,7 @@ func buildEditRegionAnnotation(req *imagesRequest) (string, error) {
 	}
 	var buf bytes.Buffer
 	if err := png.Encode(&buf, annotation); err != nil {
-		return "", fmt.Errorf("编码编辑区域标注图失败: %w", err)
+		return "", fmt.Errorf("failed to encode edit-region annotation image: %w", err)
 	}
 	return "data:image/png;base64," + base64.StdEncoding.EncodeToString(buf.Bytes()), nil
 }
@@ -1149,7 +1149,7 @@ func shrinkDataImageURL(ref string, limit int) (string, error) {
 	}
 	img, _, err := image.Decode(bytes.NewReader(data))
 	if err != nil {
-		return "", fmt.Errorf("图片过大且无法压缩: %w", err)
+		return "", fmt.Errorf("image is too large and could not be compressed: %w", err)
 	}
 	return encodeJPEGDataURLWithinLimit(img, limit)
 }
@@ -1189,7 +1189,7 @@ func shrinkImageBytes(data []byte, mimeType string, limit int) ([]byte, string, 
 	}
 	img, _, err := image.Decode(bytes.NewReader(data))
 	if err != nil {
-		return nil, "", fmt.Errorf("图片过大且无法解码进行压缩: %w", err)
+		return nil, "", fmt.Errorf("image is too large and could not be decoded for compression: %w", err)
 	}
 	return encodeJPEGWithinLimit(img, limit)
 }
@@ -1199,7 +1199,7 @@ func encodeJPEGWithinLimit(img image.Image, limit int) ([]byte, string, error) {
 	bounds := img.Bounds()
 	width, height := bounds.Dx(), bounds.Dy()
 	if width <= 0 || height <= 0 {
-		return nil, "", fmt.Errorf("图片尺寸无效")
+		return nil, "", fmt.Errorf("invalid image dimensions")
 	}
 	current := img
 	for range 10 {
@@ -1217,7 +1217,7 @@ func encodeJPEGWithinLimit(img image.Image, limit int) ([]byte, string, error) {
 		}
 		current = resizeImageNearest(img, width, height)
 	}
-	return nil, "", fmt.Errorf("图片过大，请压缩到 %dMB 以内后重试", limit/(1024*1024))
+	return nil, "", fmt.Errorf("image is too large, please compress it to under %dMB and retry", limit/(1024*1024))
 }
 
 func stripImageRevisedPrompts(calls []ImageGenCall) {
@@ -1306,7 +1306,7 @@ func buildImagesToolResponsesBody(
 	// Responses API 的 image_generation tool 每次仅生成 1 张；n>1 在 REST 侧的语义
 	// 需要多轮工具调用才能模拟，暂不支持 —— V1 限定 n=1。
 	if req.N > 1 {
-		return nil, 0, 0, fmt.Errorf("OAuth 模式下 n 只能为 1（REST→tools 翻译路径暂不支持多图）")
+		return nil, 0, 0, fmt.Errorf("n must be 1 in OAuth mode (the REST-to-tools translation path does not support multiple images yet)")
 	}
 	if err := shrinkResponsesInputImages(req); err != nil {
 		return nil, 0, 0, err
@@ -1501,7 +1501,7 @@ func (g *OpenAIGateway) forwardImagesViaResponsesToolWithURL(ctx context.Context
 	}
 
 	if err := conn.WriteJSON(json.RawMessage(createMsg)); err != nil {
-		reason := fmt.Sprintf("发送 WebSocket 消息失败: %v", err)
+		reason := fmt.Sprintf("failed to send WebSocket message: %v", err)
 		return transientOutcome(reason), fmt.Errorf("%s", reason)
 	}
 
@@ -1584,7 +1584,7 @@ func (g *OpenAIGateway) forwardImagesViaResponsesToolWithURL(ctx context.Context
 	}
 
 	if len(wsResult.ImageGenCalls) == 0 {
-		reason := fmt.Sprintf("image_generation_call 为空 (n=%d)", n)
+		reason := fmt.Sprintf("image_generation_call is empty (n=%d)", n)
 		if detail := imageGenCallDiagnosticsDetail(wsResult); detail != "" {
 			reason += ": " + detail
 		}
@@ -1607,7 +1607,7 @@ func (g *OpenAIGateway) forwardImagesViaResponsesToolWithURL(ctx context.Context
 				Duration: elapsed,
 			}, nil
 		}
-		body := buildImagesErrorBody(http.StatusBadGateway, "上游未返回图像结果")
+		body := buildImagesErrorBody(http.StatusBadGateway, "upstream returned no image result")
 		if sseKA != nil {
 			sseKA.Stop()
 			g.logger.Warn("Images OAuth 未返回图像结果，已脱敏响应",
@@ -1682,7 +1682,7 @@ func (g *OpenAIGateway) forwardImagesViaResponsesToolWithURL(ctx context.Context
 	}
 	if sseKA != nil {
 		if err := writeImagesRESTSSE(req.Writer, respBody); err != nil {
-			downstreamErr := newDownstreamWriteError(fmt.Errorf("写入客户端 Images SSE 失败: %w", err))
+			downstreamErr := newDownstreamWriteError(fmt.Errorf("failed to write Images SSE to client: %w", err))
 			return streamAbortedOutcome(downstreamErr, usage, elapsed), nil
 		}
 		outcome.Upstream.Headers = http.Header{"Content-Type": []string{"text/event-stream"}}
@@ -1815,7 +1815,7 @@ func normalizeImagesResponseModelAliases(body []byte, fallbackModel, mappedUpstr
 func handleImagesResponseWithLogger(logger *slog.Logger, resp *http.Response, w http.ResponseWriter, sseKA *ssePingKeepAlive, start time.Time, fallbackModel string, imgReq *imagesRequest) (sdk.ForwardOutcome, error) {
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		reason := fmt.Sprintf("读取 Images 响应失败: %v", err)
+		reason := fmt.Sprintf("failed to read Images response: %v", err)
 		if sseKA != nil {
 			if downstreamErr := stopSSEPingKeepAlive(sseKA); downstreamErr != nil {
 				return streamAbortedOutcome(downstreamErr, nil, time.Since(start)), nil
@@ -1891,7 +1891,7 @@ func handleImagesResponseWithLogger(logger *slog.Logger, resp *http.Response, w 
 			return streamAbortedOutcome(downstreamErr, usage, elapsed), nil
 		}
 		if err := writeImagesRESTSSE(w, body); err != nil {
-			downstreamErr := newDownstreamWriteError(fmt.Errorf("写入客户端 Images SSE 失败: %w", err))
+			downstreamErr := newDownstreamWriteError(fmt.Errorf("failed to write Images SSE to client: %w", err))
 			return streamAbortedOutcome(downstreamErr, usage, elapsed), nil
 		}
 	} else if w != nil {
@@ -1994,7 +1994,7 @@ func (g *OpenAIGateway) pollAsyncImageTask(
 
 		pollReq, err := http.NewRequestWithContext(ctx, http.MethodGet, pollURL, nil)
 		if err != nil {
-			return nil, fmt.Errorf("构建轮询请求失败: %w", err)
+			return nil, fmt.Errorf("failed to build poll request: %w", err)
 		}
 		setAuthHeaders(pollReq, account)
 
@@ -2027,7 +2027,7 @@ func (g *OpenAIGateway) pollAsyncImageTask(
 			if reason == "" {
 				reason = "unknown error"
 			}
-			return nil, fmt.Errorf("异步图片任务失败: %s", reason)
+			return nil, fmt.Errorf("async image task failed: %s", reason)
 		}
 
 		select {
@@ -2036,14 +2036,14 @@ func (g *OpenAIGateway) pollAsyncImageTask(
 		case <-time.After(asyncImagePollInterval):
 		}
 	}
-	return nil, fmt.Errorf("异步图片任务 %s 超时", taskID)
+	return nil, fmt.Errorf("async image task %s timed out", taskID)
 }
 
 // transformAsyncImageResult 将异步任务完成响应转换为 OpenAI Images API 标准格式。
 func transformAsyncImageResult(body []byte) ([]byte, error) {
 	images := gjson.GetBytes(body, "data.result.images")
 	if !images.Exists() || !images.IsArray() {
-		return nil, fmt.Errorf("异步任务结果中未找到图片数据")
+		return nil, fmt.Errorf("no image data found in async task result")
 	}
 
 	var dataItems []map[string]any
@@ -2059,7 +2059,7 @@ func transformAsyncImageResult(body []byte) ([]byte, error) {
 	}
 
 	if len(dataItems) == 0 {
-		return nil, fmt.Errorf("异步任务结果中图片 URL 为空")
+		return nil, fmt.Errorf("image URL in async task result is empty")
 	}
 
 	result := map[string]any{

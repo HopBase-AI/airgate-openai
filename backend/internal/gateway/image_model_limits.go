@@ -44,13 +44,13 @@ func validateImageModelSize(modelID, size string) error {
 				return nil
 			}
 		}
-		return fmt.Errorf("模型 %s 不支持 %s 档，支持: %s",
+		return fmt.Errorf("model %s does not support tier %s; supported: %s",
 			modelID, strings.ToUpper(literal), strings.ToUpper(strings.Join(tiers, ", ")))
 	}
 	if _, _, ok := parseImageSize(size); ok {
 		return nil
 	}
-	return fmt.Errorf("模型 %s 的 size %q 无法解析，应为 WIDTHxHEIGHT（任意比例，就近映射官方档位）或 1K/2K/4K", modelID, size)
+	return fmt.Errorf("model %s: size %q is not valid; expected WIDTHxHEIGHT (any aspect ratio, mapped to the nearest official tier) or 1K/2K/4K", modelID, size)
 }
 
 // geminiImageModelDeclaredTiers 返回模型声明的牌价档位（小写 1k/2k/4k，升序）。

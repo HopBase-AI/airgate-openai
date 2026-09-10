@@ -313,7 +313,7 @@ func handleStreamResponseWithKeepAliveOptions(logger *slog.Logger, resp *http.Re
 				keepAlive.Stop()
 			}
 			if err := writeOrBufferSSELine(w, resp.StatusCode, lineForClient, &pending, &streamStarted, diagnostics.hasOutput()); err != nil {
-				streamErr = newDownstreamWriteError(fmt.Errorf("写入客户端 SSE 失败: %w", err))
+				streamErr = newDownstreamWriteError(fmt.Errorf("failed to write SSE to client: %w", err))
 				clientWriteFailed = true
 				_ = resp.Body.Close()
 				break
@@ -337,7 +337,7 @@ func handleStreamResponseWithKeepAliveOptions(logger *slog.Logger, resp *http.Re
 			keepAlive.Stop()
 		}
 		if err := writeOrBufferSSELine(w, resp.StatusCode, lineForClient, &pending, &streamStarted, diagnostics.hasOutput()); err != nil {
-			streamErr = newDownstreamWriteError(fmt.Errorf("写入客户端 SSE 失败: %w", err))
+			streamErr = newDownstreamWriteError(fmt.Errorf("failed to write SSE to client: %w", err))
 			clientWriteFailed = true
 			_ = resp.Body.Close()
 			break
@@ -353,7 +353,7 @@ func handleStreamResponseWithKeepAliveOptions(logger *slog.Logger, resp *http.Re
 		clientWriteFailed = true
 	}
 	if err := scanner.Err(); err != nil && streamErr == nil {
-		streamErr = fmt.Errorf("读取上游 SSE 失败: %w", err)
+		streamErr = fmt.Errorf("failed to read upstream SSE: %w", err)
 	}
 	// 看门狗触发且未向客户端写出任何内容:判可重试的上游瞬时故障,core 会换账号重来。
 	// 已经开始出内容再断的情况不走这里(重试会重复内容),仍按原有流中断语义处理。
@@ -366,15 +366,15 @@ func handleStreamResponseWithKeepAliveOptions(logger *slog.Logger, resp *http.Re
 		return sdk.ForwardOutcome{
 			Kind:     sdk.OutcomeUpstreamTransient,
 			Upstream: sdk.UpstreamResponse{StatusCode: http.StatusBadGateway},
-			Reason:   fmt.Sprintf("上游 %.0fs 未产出任何内容,换账号重试", firstOutputTimeout.Seconds()),
+			Reason:   fmt.Sprintf("upstream produced no output within %.0fs, retrying with another account", firstOutputTimeout.Seconds()),
 			Duration: time.Since(start),
 		}, nil
 	}
 	if streamErr == nil && !completed {
-		streamErr = fmt.Errorf("未收到上游流式完成事件")
+		streamErr = fmt.Errorf("upstream stream completion event was not received")
 	}
 	if streamErr == nil && completed && !diagnostics.hasOutput() {
-		streamErr = fmt.Errorf("上游流式响应为空：已收到完成事件但没有文本、工具调用或响应输出")
+		streamErr = fmt.Errorf("upstream stream response is empty: completion event received but no text, tool call or response output")
 	}
 	if streamErr != nil && streamStarted && !streamErrorWritten && !clientWriteFailed {
 		writeSanitizedSSEError(w)
@@ -719,7 +719,7 @@ func flushResponseWriter(w http.ResponseWriter) {
 }
 
 func writeSanitizedSSEError(w http.ResponseWriter) {
-	_, _ = w.Write([]byte("data: {\"error\":{\"message\":\"请求暂时无法完成，请稍后重试\",\"type\":\"server_error\",\"code\":\"upstream_error\"}}\n\n"))
+	_, _ = w.Write([]byte("data: {\"error\":{\"message\":\"the request could not be completed right now, please retry later\",\"type\":\"server_error\",\"code\":\"upstream_error\"}}\n\n"))
 	flushResponseWriter(w)
 }
 
@@ -740,7 +740,7 @@ func handleNonStreamResponse(resp *http.Response, w http.ResponseWriter, start t
 func handleNonStreamResponseWithOptions(resp *http.Response, w http.ResponseWriter, start time.Time, reqServiceTier string, options streamResponseOptions) (sdk.ForwardOutcome, error) {
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		reason := fmt.Sprintf("读取上游响应失败: %v", err)
+		reason := fmt.Sprintf("failed to read upstream response: %v", err)
 		return transientOutcome(reason), fmt.Errorf("%s", reason)
 	}
 	if problem, errorEnvelope := nonStreamJSONBodyProblem(resp, body); problem != "" {
@@ -813,10 +813,10 @@ func nonStreamJSONBodyProblem(resp *http.Response, body []byte) (string, bool) {
 	}
 	trimmed := bytes.TrimSpace(body)
 	if len(trimmed) == 0 {
-		return "上游以 2xx 返回空响应体", false
+		return "upstream returned 2xx with an empty body", false
 	}
 	if !gjson.ValidBytes(trimmed) {
-		return "上游以 2xx 返回非 JSON 响应体: " + truncate(string(trimmed), 120), false
+		return "upstream returned 2xx with a non-JSON body: " + truncate(string(trimmed), 120), false
 	}
 	errField := gjson.GetBytes(trimmed, "error")
 	if !errField.Exists() || errField.Type == gjson.Null || errField.Raw == "{}" || errField.Raw == `""` {
@@ -826,7 +826,7 @@ func nonStreamJSONBodyProblem(resp *http.Response, body []byte) (string, bool) {
 	if message == "" {
 		message = truncate(errField.Raw, 160)
 	}
-	return "上游以 2xx 返回错误体: " + message, true
+	return "upstream returned 2xx with an error body: " + message, true
 }
 
 // expectsJSONResponsePath 判定该上游路径的成功响应必须是 JSON。
@@ -944,7 +944,7 @@ func ParseSSEStream(reader io.Reader, handler WSEventHandler) WSResult {
 			if failure := classifyResponsesFailure([]byte(data)); failure != nil {
 				result.Err = failure
 			} else {
-				result.Err = fmt.Errorf("上游错误: %s", data)
+				result.Err = fmt.Errorf("upstream error: %s", data)
 			}
 			finalizeWSResult(&result, &textBuilder, &reasoningBuilder, start)
 			return result
@@ -964,7 +964,7 @@ func ParseSSEStream(reader io.Reader, handler WSEventHandler) WSResult {
 				result.CompletedEventRaw = append([]byte(nil), []byte(data)...)
 				result.StopReason = reason
 			} else {
-				result.Err = fmt.Errorf("响应不完整: %s", reason)
+				result.Err = fmt.Errorf("incomplete response: %s", reason)
 			}
 			finalizeWSResult(&result, &textBuilder, &reasoningBuilder, start)
 			return result
@@ -988,7 +988,7 @@ func ParseSSEStream(reader io.Reader, handler WSEventHandler) WSResult {
 	}
 
 	if err := scanner.Err(); err != nil && result.Err == nil {
-		result.Err = fmt.Errorf("读取 SSE 失败: %w", err)
+		result.Err = fmt.Errorf("failed to read SSE: %w", err)
 	}
 
 	finalizeWSResult(&result, &textBuilder, &reasoningBuilder, start)
@@ -1375,32 +1375,32 @@ func parseSSEFailureEvent(data []byte) error {
 		errNode := gjson.GetBytes(data, "response.error")
 		msg := strings.TrimSpace(errNode.Get("message").String())
 		if msg == "" {
-			msg = "上游返回 response.failed"
+			msg = "upstream returned response.failed"
 		}
 		errType := strings.ToLower(errNode.Get("type").String())
 		errCode := strings.ToLower(errNode.Get("code").String())
 
 		switch {
 		case containsAny(errType, errCode, msg, "previous_response_not_found", "previous response", "response not found"):
-			return fmt.Errorf("上游续链锚点失效: %s", msg)
+			return fmt.Errorf("upstream continuation anchor is no longer valid: %s", msg)
 		case containsAny(errType, errCode, msg, "context_length", "context window", "max_tokens", "max_input_tokens", "max_output_tokens", "token limit", "too many tokens"):
-			return fmt.Errorf("上游上下文窗口超限: %s", msg)
+			return fmt.Errorf("upstream context window exceeded: %s", msg)
 		case containsAny(errType, errCode, msg, "quota", "insufficient_quota"):
-			return fmt.Errorf("上游配额不足: %s", msg)
+			return fmt.Errorf("upstream quota exhausted: %s", msg)
 		case containsAny(errType, errCode, msg, "usage_not_included"):
-			return fmt.Errorf("上游使用权不包含: %s", msg)
+			return fmt.Errorf("not included in upstream entitlement: %s", msg)
 		case containsAny(errType, errCode, msg, "invalid_prompt", "invalid_request"):
-			return fmt.Errorf("上游请求无效: %s", msg)
+			return fmt.Errorf("upstream rejected the request as invalid: %s", msg)
 		case containsAny(errType, errCode, msg, "server_overloaded", "overloaded", "slow_down"):
-			return fmt.Errorf("上游服务繁忙: %s", msg)
+			return fmt.Errorf("upstream service is busy: %s", msg)
 		case containsAny(errType, errCode, msg, "rate_limit"):
 			delay := parseRetryDelay(msg)
 			if delay > 0 {
-				return fmt.Errorf("上游速率限制(建议 %s 后重试): %s", delay, msg)
+				return fmt.Errorf("upstream rate limited (retry after %s): %s", delay, msg)
 			}
-			return fmt.Errorf("上游速率限制: %s", msg)
+			return fmt.Errorf("upstream rate limited: %s", msg)
 		default:
-			return fmt.Errorf("上游流式失败(type=%s, code=%s): %s", errType, errCode, msg)
+			return fmt.Errorf("upstream stream failed (type=%s, code=%s): %s", errType, errCode, msg)
 		}
 
 	case "response.incomplete":
@@ -1408,7 +1408,7 @@ func parseSSEFailureEvent(data []byte) error {
 		if reason == "" {
 			reason = "unknown"
 		}
-		return fmt.Errorf("上游返回不完整响应: %s", reason)
+		return fmt.Errorf("upstream returned an incomplete response: %s", reason)
 	}
 	return nil
 }

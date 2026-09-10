@@ -614,7 +614,7 @@ func TestHandleStreamResponseTreatsCompletedEmptyStreamAsFailure(t *testing.T) {
 	if outcome.Kind != sdk.OutcomeUpstreamTransient {
 		t.Fatalf("expected OutcomeUpstreamTransient, got %v", outcome.Kind)
 	}
-	if !strings.Contains(outcome.Reason, "上游流式响应为空") {
+	if !strings.Contains(outcome.Reason, "upstream stream response is empty") {
 		t.Fatalf("unexpected reason %q", outcome.Reason)
 	}
 	if w.Body.Len() != 0 {

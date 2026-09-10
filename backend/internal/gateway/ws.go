@@ -283,11 +283,11 @@ func formatWebSocketDialError(resp *http.Response, err error) error {
 		hint := ""
 		switch resp.StatusCode {
 		case 401:
-			hint = "认证失败，access_token 已过期或账号已被停用"
+			hint = "authentication failed: access_token expired or account disabled"
 		case 403:
-			hint = "访问被拒绝，账号可能已被禁用或无权限"
+			hint = "access denied: account may be disabled or lacks permission"
 		case 429:
-			hint = "请求过于频繁，请稍后重试"
+			hint = "too many requests, please retry later"
 		}
 		if hint != "" {
 			if upstreamMsg != "" {
@@ -296,11 +296,11 @@ func formatWebSocketDialError(resp *http.Response, err error) error {
 			return wrap(fmt.Sprintf("%s (HTTP %d)", hint, resp.StatusCode))
 		}
 		if upstreamMsg != "" {
-			return wrap(fmt.Sprintf("WebSocket 握手失败: %s (HTTP %d)", upstreamMsg, resp.StatusCode))
+			return wrap(fmt.Sprintf("WebSocket handshake failed: %s (HTTP %d)", upstreamMsg, resp.StatusCode))
 		}
-		return wrap(fmt.Sprintf("WebSocket 握手失败 (HTTP %d): %v", resp.StatusCode, err))
+		return wrap(fmt.Sprintf("WebSocket handshake failed (HTTP %d): %v", resp.StatusCode, err))
 	}
-	return fmt.Errorf("WebSocket 连接失败: %w", err)
+	return fmt.Errorf("WebSocket connection failed: %w", err)
 }
 
 func cloneHTTPHeader(headers http.Header) http.Header {
@@ -338,7 +338,7 @@ func ReceiveWSResponse(ctx context.Context, conn *websocket.Conn, handler WSEven
 			if ctx.Err() != nil {
 				result.Err = ctx.Err()
 			} else {
-				result.Err = fmt.Errorf("设置 WebSocket 读取超时失败: %w", err)
+				result.Err = fmt.Errorf("failed to set WebSocket read deadline: %w", err)
 			}
 			break
 		}
@@ -348,7 +348,7 @@ func ReceiveWSResponse(ctx context.Context, conn *websocket.Conn, handler WSEven
 			if ctx.Err() != nil {
 				result.Err = ctx.Err()
 			} else {
-				result.Err = fmt.Errorf("读取 WebSocket 消息失败: %w", err)
+				result.Err = fmt.Errorf("failed to read WebSocket message: %w", err)
 			}
 			break
 		}
@@ -435,7 +435,7 @@ func ReceiveWSResponse(ctx context.Context, conn *websocket.Conn, handler WSEven
 			if failure := classifyResponsesFailure(msg); failure != nil {
 				result.Err = failure
 			} else {
-				result.Err = fmt.Errorf("上游错误: %s", string(msg))
+				result.Err = fmt.Errorf("upstream error: %s", string(msg))
 			}
 			finalizeWSResult(&result, &textBuilder, &reasoningBuilder, start)
 			return result
@@ -455,7 +455,7 @@ func ReceiveWSResponse(ctx context.Context, conn *websocket.Conn, handler WSEven
 				result.CompletedEventRaw = append([]byte(nil), msg...)
 				result.StopReason = reason
 			} else {
-				result.Err = fmt.Errorf("响应不完整: %s", reason)
+				result.Err = fmt.Errorf("incomplete response: %s", reason)
 			}
 			finalizeWSResult(&result, &textBuilder, &reasoningBuilder, start)
 			return result
@@ -471,7 +471,7 @@ func ReceiveWSResponse(ctx context.Context, conn *websocket.Conn, handler WSEven
 						errMsg = m
 					}
 				}
-				result.Err = fmt.Errorf("WebSocket 错误: %s", errMsg)
+				result.Err = fmt.Errorf("WebSocket error: %s", errMsg)
 			}
 			finalizeWSResult(&result, &textBuilder, &reasoningBuilder, start)
 			return result
@@ -847,7 +847,7 @@ func summarizeImageGenCallItem(item map[string]any) string {
 		parts = append(parts, "item="+truncate(string(raw), 500))
 	}
 	if len(parts) == 0 {
-		return "image_generation_call result 为空"
+		return "image_generation_call result is empty"
 	}
 	return strings.Join(parts, ", ")
 }

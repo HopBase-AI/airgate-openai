@@ -32,9 +32,9 @@ func rejectInvalidChatMessages(req *sdk.ForwardRequest, method, path string, sta
 	if messages.IsArray() && len(messages.Array()) > 0 {
 		return sdk.ForwardOutcome{}, false
 	}
-	reason := "messages 不能为空数组"
+	reason := "messages must not be an empty array"
 	if !messages.Exists() {
-		reason = "缺少 messages 字段"
+		reason = "missing messages field"
 	}
 	return sdk.ForwardOutcome{
 		Kind: sdk.OutcomeClientError,

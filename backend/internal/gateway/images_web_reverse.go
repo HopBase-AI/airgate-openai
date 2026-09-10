@@ -53,7 +53,7 @@ func decodeImageRefs(refs []string) ([]imgen.ImageInput, error) {
 func decodeDataImageRef(ref string) (imgen.ImageInput, error) {
 	commaIdx := strings.Index(ref, ",")
 	if commaIdx < 0 {
-		return imgen.ImageInput{}, fmt.Errorf("data URL 缺少 base64 数据")
+		return imgen.ImageInput{}, fmt.Errorf("data URL is missing base64 payload")
 	}
 	header := ref[:commaIdx]
 	b64 := ref[commaIdx+1:]
@@ -61,7 +61,7 @@ func decodeDataImageRef(ref string) (imgen.ImageInput, error) {
 	if err != nil {
 		data, err = base64.RawStdEncoding.DecodeString(b64)
 		if err != nil {
-			return imgen.ImageInput{}, fmt.Errorf("base64 解码失败: %w", err)
+			return imgen.ImageInput{}, fmt.Errorf("failed to decode base64: %w", err)
 		}
 	}
 	mimeType := strings.TrimPrefix(header, "data:")
@@ -70,7 +70,7 @@ func decodeDataImageRef(ref string) (imgen.ImageInput, error) {
 	}
 	data, mimeType, err = shrinkImageBytes(data, mimeType, maxEditInputImageBytes)
 	if err != nil {
-		return imgen.ImageInput{}, fmt.Errorf("压缩参考图片失败: %w", err)
+		return imgen.ImageInput{}, fmt.Errorf("failed to compress reference image: %w", err)
 	}
 	return imgen.ImageInput{Data: data, MimeType: mimeType}, nil
 }
@@ -78,26 +78,26 @@ func decodeDataImageRef(ref string) (imgen.ImageInput, error) {
 func downloadImageRef(client *http.Client, ref string) (imgen.ImageInput, error) {
 	resp, err := client.Get(ref)
 	if err != nil {
-		return imgen.ImageInput{}, fmt.Errorf("下载参考图片失败: %w", err)
+		return imgen.ImageInput{}, fmt.Errorf("failed to download reference image: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return imgen.ImageInput{}, fmt.Errorf("下载参考图片返回 HTTP %d", resp.StatusCode)
+		return imgen.ImageInput{}, fmt.Errorf("reference image download returned HTTP %d", resp.StatusCode)
 	}
 	contentType := strings.TrimSpace(strings.Split(resp.Header.Get("Content-Type"), ";")[0])
 	if !strings.HasPrefix(strings.ToLower(contentType), "image/") {
-		return imgen.ImageInput{}, fmt.Errorf("参考图片 Content-Type 不是 image/*: %s", contentType)
+		return imgen.ImageInput{}, fmt.Errorf("reference image Content-Type is not image/*: %s", contentType)
 	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxRemoteImageBytes+1))
 	if err != nil {
-		return imgen.ImageInput{}, fmt.Errorf("读取参考图片失败: %w", err)
+		return imgen.ImageInput{}, fmt.Errorf("failed to read reference image: %w", err)
 	}
 	if len(data) > maxRemoteImageBytes {
-		return imgen.ImageInput{}, fmt.Errorf("参考图片过大")
+		return imgen.ImageInput{}, fmt.Errorf("reference image is too large")
 	}
 	data, contentType, err = shrinkImageBytes(data, contentType, maxEditInputImageBytes)
 	if err != nil {
-		return imgen.ImageInput{}, fmt.Errorf("压缩参考图片失败: %w", err)
+		return imgen.ImageInput{}, fmt.Errorf("failed to compress reference image: %w", err)
 	}
 	return imgen.ImageInput{Data: data, MimeType: contentType}, nil
 }
@@ -152,7 +152,7 @@ func (g *OpenAIGateway) forwardImagesViaWebReverse(ctx context.Context, req *sdk
 	imgReq, err := parseImagesRequest(req.Body, req.Headers.Get("Content-Type"), isEdit)
 	if err != nil {
 		return webReverseImagesError(start, http.StatusBadRequest, req.Writer,
-			fmt.Sprintf("解析 Images 请求失败: %v", err))
+			fmt.Sprintf("failed to parse Images request: %v", err))
 	}
 	// Web 逆向必然走 gpt-image-2（imagesWebReverseModel），统一启用严格 size 校验，
 	// 提前挡住上游 chatgpt.com 必拒的请求，避免浪费一次 PoW + 30s 轮询。
@@ -172,13 +172,13 @@ func (g *OpenAIGateway) forwardImagesViaWebReverse(ctx context.Context, req *sdk
 		imageInputs, err = decodeImageRefs(imgReq.Images)
 		if err != nil {
 			return webReverseImagesError(start, http.StatusBadRequest, req.Writer,
-				fmt.Sprintf("解码参考图片失败: %v", err))
+				fmt.Sprintf("failed to decode reference image: %v", err))
 		}
 	}
 
 	accessToken := account.Credentials["access_token"]
 	if accessToken == "" {
-		return webReverseImagesError(start, http.StatusUnauthorized, req.Writer, "OAuth 账号缺少 access_token")
+		return webReverseImagesError(start, http.StatusUnauthorized, req.Writer, "OAuth account is missing access_token")
 	}
 	var proxyURL *url.URL
 	if account.ProxyURL != "" {
@@ -250,7 +250,7 @@ func (g *OpenAIGateway) forwardImagesViaWebReverse(ctx context.Context, req *sdk
 	respBody := buildWebReverseImagesResponse(imgRes, 0, 0)
 	if sseKA != nil {
 		if err := writeImagesRESTSSE(req.Writer, respBody); err != nil {
-			downstreamErr := newDownstreamWriteError(fmt.Errorf("写入客户端 Images SSE 失败: %w", err))
+			downstreamErr := newDownstreamWriteError(fmt.Errorf("failed to write Images SSE to client: %w", err))
 			return streamAbortedOutcome(downstreamErr, usage, elapsed), nil
 		}
 		outcome.Upstream.Headers = http.Header{"Content-Type": []string{"text/event-stream"}}
@@ -400,6 +400,7 @@ func isWebReverseRiskControlText(message string) bool {
 		strings.Contains(lower, "pow") ||
 		strings.Contains(lower, "sentinel") ||
 		strings.Contains(lower, "challenge") ||
+		strings.Contains(lower, "risk control") ||
 		strings.Contains(message, "风控")
 }
 

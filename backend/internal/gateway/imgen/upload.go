@@ -81,7 +81,7 @@ func mimeToExt(mime string) string {
 // uploadFile 执行完整的 3 步上传流程：fileCreate → 二进制上传 → fileConfirm。
 func (c *Client) uploadFile(input ImageInput) (*UploadedFile, error) {
 	if len(input.Data) == 0 {
-		return nil, fmt.Errorf("图片数据为空")
+		return nil, fmt.Errorf("image data is empty")
 	}
 
 	mimeType := input.MimeType
@@ -107,13 +107,13 @@ func (c *Client) uploadFile(input ImageInput) (*UploadedFile, error) {
 	fileID, uploadURL, err := c.fileCreate(fileName, fileSize, mimeType)
 	if err != nil {
 		logger.Warn("imgen_upload_failed", "stage", "file_create", sdk.LogFieldError, err)
-		return nil, fmt.Errorf("创建文件记录失败: %w", err)
+		return nil, fmt.Errorf("failed to create file record: %w", err)
 	}
 	logger.Debug("imgen_upload_file_created", "file_id", fileID)
 
 	if err := c.fileUploadData(fileID, uploadURL, input.Data, mimeType); err != nil {
 		logger.Warn("imgen_upload_failed", "stage", "binary_upload", "file_id", fileID, sdk.LogFieldError, err)
-		return nil, fmt.Errorf("上传文件失败: %w", err)
+		return nil, fmt.Errorf("failed to upload file: %w", err)
 	}
 	logger.Debug("imgen_upload_completed", "file_id", fileID, "file_size", fileSize)
 
@@ -159,10 +159,10 @@ func (c *Client) fileCreate(fileName string, fileSize int64, mimeType string) (f
 		Status    string `json:"status"`
 	}
 	if err := json.Unmarshal(respBody, &result); err != nil {
-		return "", "", fmt.Errorf("解析响应失败: %w, body=%s", err, respBody)
+		return "", "", fmt.Errorf("failed to parse response: %w, body=%s", err, respBody)
 	}
 	if result.FileID == "" {
-		return "", "", fmt.Errorf("未获取到 file_id, body=%s", respBody)
+		return "", "", fmt.Errorf("file_id not returned, body=%s", respBody)
 	}
 	return result.FileID, result.UploadURL, nil
 }

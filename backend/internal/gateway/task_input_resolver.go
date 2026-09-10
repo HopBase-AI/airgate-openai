@@ -91,7 +91,7 @@ func (g *OpenAIGateway) maybeResolveRuntimeAssetURL(ctx context.Context, ref str
 func objectKeyFromRuntimeAssetURL(ref string) (string, error) {
 	rest := strings.TrimPrefix(ref, runtimeAssetURLPrefix)
 	if rest == "" {
-		return "", fmt.Errorf("runtime asset URL 缺少 object key: %s", ref)
+		return "", fmt.Errorf("runtime asset URL is missing object key: %s", ref)
 	}
 	// 把可能存在的 query string 砍掉（缩略图 ?w=256 不影响原始 key 解析）
 	if q := strings.IndexByte(rest, '?'); q >= 0 {

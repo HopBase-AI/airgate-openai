@@ -208,7 +208,7 @@ func (s *chatCompletionsStreamWriter) writePayload(payload string) {
 		err = io.ErrShortWrite
 	}
 	if err != nil {
-		s.err = newDownstreamWriteError(fmt.Errorf("写入客户端 Chat Completions 流失败: %w", err))
+		s.err = newDownstreamWriteError(fmt.Errorf("failed to write Chat Completions stream to client: %w", err))
 		return
 	}
 	if s.flusher != nil {

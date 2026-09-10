@@ -77,7 +77,7 @@ type asyncImageTaskFailedError struct {
 }
 
 func (e *asyncImageTaskFailedError) Error() string {
-	return fmt.Sprintf("异步图片任务失败: HTTP %d: %s", e.StatusCode, truncate(string(e.Body), 300))
+	return fmt.Sprintf("async image task failed: HTTP %d: %s", e.StatusCode, truncate(string(e.Body), 300))
 }
 
 // pollMiniMaxImageTask 轮询 MiniMax 图片任务直到终态或 ctx 结束。
@@ -117,7 +117,7 @@ func (g *OpenAIGateway) pollMiniMaxImageTask(
 
 		pollReq, err := http.NewRequestWithContext(ctx, http.MethodGet, pollURL, nil)
 		if err != nil {
-			return nil, fmt.Errorf("构建轮询请求失败: %w", err)
+			return nil, fmt.Errorf("failed to build poll request: %w", err)
 		}
 		setAuthHeaders(pollReq, account)
 
@@ -130,7 +130,7 @@ func (g *OpenAIGateway) pollMiniMaxImageTask(
 			logger.Warn("images_minimax_task_poll_error",
 				"task_id", taskID, "failures", transportFailures, sdk.LogFieldError, err)
 			if transportFailures > miniMaxPollMaxTransportRetry {
-				return nil, fmt.Errorf("异步任务查询连续失败: %w", err)
+				return nil, fmt.Errorf("async task status query failed repeatedly: %w", err)
 			}
 			if !sleepCtx(ctx, interval) {
 				return nil, ctx.Err()
@@ -153,7 +153,7 @@ func (g *OpenAIGateway) pollMiniMaxImageTask(
 				logger.Warn("images_minimax_task_poll_http_error",
 					"task_id", taskID, "status", pollResp.StatusCode, "failures", transportFailures)
 				if transportFailures > miniMaxPollMaxTransportRetry {
-					return nil, fmt.Errorf("异步任务查询连续 HTTP %d", pollResp.StatusCode)
+					return nil, fmt.Errorf("async task status query repeatedly returned HTTP %d", pollResp.StatusCode)
 				}
 				if !sleepCtx(ctx, interval) {
 					return nil, ctx.Err()
@@ -200,7 +200,7 @@ func (g *OpenAIGateway) pollMiniMaxImageTask(
 			"task_id", taskID, "trace_id", traceID, "count", unknownResponses,
 			sdk.LogFieldReason, truncate(string(body), 300))
 		if unknownResponses >= miniMaxPollMaxUnknown {
-			return nil, fmt.Errorf("异步任务返回未知响应(trace_id=%s)", traceID)
+			return nil, fmt.Errorf("async task returned an unknown response (trace_id=%s)", traceID)
 		}
 		if !sleepCtx(ctx, interval) {
 			return nil, ctx.Err()

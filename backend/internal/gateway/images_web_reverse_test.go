@@ -11,7 +11,7 @@ import (
 )
 
 func TestWebReverseImagesErrorClientStatusReturnsNilErr(t *testing.T) {
-	outcome, err := webReverseImagesError(time.Now(), http.StatusBadRequest, nil, "图片尺寸不合法")
+	outcome, err := webReverseImagesError(time.Now(), http.StatusBadRequest, nil, "invalid image size")
 	if err != nil {
 		t.Fatalf("expected nil err for client status, got %v", err)
 	}
@@ -21,13 +21,13 @@ func TestWebReverseImagesErrorClientStatusReturnsNilErr(t *testing.T) {
 	if outcome.Upstream.StatusCode != http.StatusBadRequest {
 		t.Fatalf("StatusCode = %d, want %d", outcome.Upstream.StatusCode, http.StatusBadRequest)
 	}
-	if !strings.Contains(string(outcome.Upstream.Body), "图片尺寸不合法") {
+	if !strings.Contains(string(outcome.Upstream.Body), "invalid image size") {
 		t.Fatalf("body = %s, want message to be preserved", outcome.Upstream.Body)
 	}
 }
 
 func TestWebReverseImagesErrorAccountStatusKeepsErr(t *testing.T) {
-	outcome, err := webReverseImagesError(time.Now(), http.StatusUnauthorized, nil, "OAuth 账号缺少 access_token")
+	outcome, err := webReverseImagesError(time.Now(), http.StatusUnauthorized, nil, "OAuth account is missing access_token")
 	if err == nil {
 		t.Fatalf("expected err for account status")
 	}
@@ -38,8 +38,8 @@ func TestWebReverseImagesErrorAccountStatusKeepsErr(t *testing.T) {
 
 func TestWebReverseRiskControlUsesRecoverableCooldown(t *testing.T) {
 	tests := []string{
-		`获取 chat token 失败: HTTP 403: {"detail":"sentinel challenge required"}`,
-		"未获取到任何图片（可能原因: PoW 未通过 / AT 过期 / 触发风控）",
+		`failed to get chat token: HTTP 403: {"detail":"sentinel challenge required"}`,
+		"no image was returned (possible causes: PoW failed / auth token expired / risk control triggered)",
 	}
 	for _, message := range tests {
 		t.Run(message, func(t *testing.T) {

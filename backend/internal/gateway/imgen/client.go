@@ -80,7 +80,7 @@ func (c *Client) Bootstrap() error {
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("bootstrap 请求失败: %w", err)
+		return fmt.Errorf("bootstrap request failed: %w", err)
 	}
 	_, _ = io.Copy(io.Discard, resp.Body)
 	_ = resp.Body.Close()

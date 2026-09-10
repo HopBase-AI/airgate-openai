@@ -61,7 +61,7 @@ func (h imageEditHandler) BuildResponse(task *sdk.HostTask) map[string]any {
 func buildImageTaskInput(req *sdk.ForwardRequest, reqPath string, isEdit bool) (map[string]any, map[string]string, error) {
 	parsed, err := parseImagesRequest(req.Body, req.Headers.Get("Content-Type"), isEdit)
 	if err != nil {
-		return nil, nil, fmt.Errorf("解析图片请求失败: %w", err)
+		return nil, nil, fmt.Errorf("failed to parse image request: %w", err)
 	}
 
 	model := parsed.Model
@@ -144,7 +144,7 @@ func executeImageTask(ctx context.Context, g *OpenAIGateway, task sdk.HostTask, 
 		rt.logger.Info("task_redispatch_no_upstream_id", "task_id", task.ID)
 		return rt.Fail(ctx, &TaskError{
 			Type:    "upstream_error",
-			Message: "任务在服务重启期间中断，请重新发起",
+			Message: "task was interrupted by a service restart, please submit it again",
 		})
 	}
 
@@ -155,14 +155,14 @@ func executeImageTask(ctx context.Context, g *OpenAIGateway, task sdk.HostTask, 
 	if err := g.resolveTaskInputAssets(ctx, task.Input); err != nil {
 		return rt.Fail(ctx, &TaskError{
 			Type:    "invalid_request",
-			Message: "解析输入资源失败: " + err.Error(),
+			Message: "failed to resolve input assets: " + err.Error(),
 		})
 	}
 
 	if err := shrinkTaskInputImages(task.Input); err != nil {
 		return rt.Fail(ctx, &TaskError{
 			Type:    "invalid_request",
-			Message: "压缩输入图片失败: " + err.Error(),
+			Message: "failed to compress input image: " + err.Error(),
 		})
 	}
 
@@ -170,7 +170,7 @@ func executeImageTask(ctx context.Context, g *OpenAIGateway, task sdk.HostTask, 
 	if err != nil {
 		return rt.Fail(ctx, &TaskError{
 			Type:    "invalid_request",
-			Message: "构建请求体失败: " + err.Error(),
+			Message: "failed to build request body: " + err.Error(),
 		})
 	}
 
@@ -198,7 +198,7 @@ func executeImageTask(ctx context.Context, g *OpenAIGateway, task sdk.HostTask, 
 		// 处理。所以这里没必要再对 err.Error() 做 safety 关键词匹配。
 		return rt.Fail(ctx, &TaskError{
 			Type:      "upstream_error",
-			Message:   "upstream 转发失败: " + err.Error(),
+			Message:   "upstream forward failed: " + err.Error(),
 			Retryable: !isRedispatch,
 		})
 	}
@@ -217,14 +217,14 @@ func executeImageTask(ctx context.Context, g *OpenAIGateway, task sdk.HostTask, 
 		rt.logger.Warn("store_image_assets_failed", "error", err, "body_len", len(resp.Body))
 		return rt.Fail(ctx, &TaskError{
 			Type:    "upstream_error",
-			Message: "上游响应中未包含可用图片: " + err.Error(),
+			Message: "upstream response contains no usable image: " + err.Error(),
 		})
 	}
 	if content == "" {
 		rt.logger.Warn("store_image_assets_empty", "body_len", len(resp.Body))
 		return rt.Fail(ctx, &TaskError{
 			Type:    "upstream_error",
-			Message: "图片存储失败，所有图片均未能保存",
+			Message: "image storage failed, none of the images could be saved",
 		})
 	}
 
@@ -542,7 +542,7 @@ func resizeMaskDataURLToImageSize(ref string, width, height int) (string, error)
 	var decoded image.Image
 	decoded, err = png.Decode(bytes.NewReader(data))
 	if err != nil || decoded == nil {
-		return "", fmt.Errorf("缩放后的 mask PNG 无效: %w", err)
+		return "", fmt.Errorf("resized mask PNG is invalid: %w", err)
 	}
 	return "data:image/png;base64," + base64.StdEncoding.EncodeToString(data), nil
 }

@@ -96,13 +96,13 @@ func (rt *utlsRoundTripper) dialTLS(ctx context.Context, network, addr string) (
 
 	if err := uconn.HandshakeContext(ctx); err != nil {
 		_ = rawConn.Close()
-		return nil, fmt.Errorf("TLS 握手失败: %w", err)
+		return nil, fmt.Errorf("TLS handshake failed: %w", err)
 	}
 
 	np := uconn.ConnectionState().NegotiatedProtocol
 	if np != "" && np != "http/1.1" {
 		_ = uconn.Close()
-		return nil, fmt.Errorf("ALPN 协商了 %q，期望 http/1.1", np)
+		return nil, fmt.Errorf("ALPN negotiated %q, expected http/1.1", np)
 	}
 	return uconn, nil
 }
@@ -119,7 +119,7 @@ func (rt *utlsRoundTripper) dialRaw(ctx context.Context, addr string) (net.Conn,
 
 	conn, err := rt.dialer.DialContext(ctx, "tcp", proxyAddr)
 	if err != nil {
-		return nil, fmt.Errorf("连接代理 %s 失败: %w", proxyAddr, err)
+		return nil, fmt.Errorf("failed to connect to proxy %s: %w", proxyAddr, err)
 	}
 
 	connectReq := &http.Request{
@@ -136,19 +136,19 @@ func (rt *utlsRoundTripper) dialRaw(ctx context.Context, addr string) (net.Conn,
 	}
 	if err := connectReq.Write(conn); err != nil {
 		_ = conn.Close()
-		return nil, fmt.Errorf("发送 CONNECT 失败: %w", err)
+		return nil, fmt.Errorf("failed to send CONNECT: %w", err)
 	}
 
 	br := bufio.NewReader(conn)
 	resp, err := http.ReadResponse(br, connectReq)
 	if err != nil {
 		_ = conn.Close()
-		return nil, fmt.Errorf("读取 CONNECT 响应失败: %w", err)
+		return nil, fmt.Errorf("failed to read CONNECT response: %w", err)
 	}
 	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		_ = conn.Close()
-		return nil, fmt.Errorf("代理 CONNECT 返回 %s", resp.Status)
+		return nil, fmt.Errorf("proxy CONNECT returned %s", resp.Status)
 	}
 
 	if n := br.Buffered(); n > 0 {
