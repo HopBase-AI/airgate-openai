@@ -52,7 +52,7 @@ func (g *OpenAIGateway) forwardHTTP(ctx context.Context, req *sdk.ForwardRequest
 
 	requestedModel := firstNonEmptyString(req.Model, gjson.GetBytes(req.Body, "model").String())
 	if model.IsRetired(requestedModel) {
-		message := "模型 " + strings.TrimSpace(requestedModel) + " 未启用，请使用 deepseek-v4-flash-202605"
+		message := "model " + strings.TrimSpace(requestedModel) + " is not enabled, please use deepseek-v4-flash-202605"
 		return sdk.ForwardOutcome{
 			Kind: sdk.OutcomeClientError,
 			Upstream: sdk.UpstreamResponse{
@@ -101,7 +101,7 @@ func (g *OpenAIGateway) forwardHTTP(ctx context.Context, req *sdk.ForwardRequest
 	// 两者都通过 image.generate handler 的 BuildResponse 投影响应。
 	if isImageTaskListRequest(reqPath) || isImageTaskQuery(reqPath) {
 		if g.host == nil {
-			body := jsonError("任务系统未启用")
+			body := jsonError("task system is not enabled")
 			return sdk.ForwardOutcome{
 				Kind:     sdk.OutcomeClientError,
 				Upstream: sdk.UpstreamResponse{StatusCode: http.StatusServiceUnavailable, Body: body},
@@ -109,7 +109,7 @@ func (g *OpenAIGateway) forwardHTTP(ctx context.Context, req *sdk.ForwardRequest
 		}
 		handler := g.tasks.Get(taskTypeImageGenerate)
 		if handler == nil {
-			body := jsonError("任务类型未注册")
+			body := jsonError("task type is not registered")
 			return sdk.ForwardOutcome{
 				Kind:     sdk.OutcomeClientError,
 				Upstream: sdk.UpstreamResponse{StatusCode: http.StatusInternalServerError, Body: body},
@@ -122,7 +122,7 @@ func (g *OpenAIGateway) forwardHTTP(ctx context.Context, req *sdk.ForwardRequest
 	}
 
 	if !isImagesRequest(reqPath) && model.IsImageOnly(req.Model) && !isGeminiImageChatCompletionsRequest(req, reqPath) {
-		body := jsonError("图像模型不支持 Chat Completions，请使用 Images API")
+		body := jsonError("image models do not support Chat Completions, please use the Images API")
 		return sdk.ForwardOutcome{
 			Kind: sdk.OutcomeClientError,
 			Upstream: sdk.UpstreamResponse{
@@ -130,7 +130,7 @@ func (g *OpenAIGateway) forwardHTTP(ctx context.Context, req *sdk.ForwardRequest
 				Headers:    http.Header{"Content-Type": []string{"application/json"}},
 				Body:       body,
 			},
-			Reason: "图像模型不支持 chat completions",
+			Reason: "image models do not support chat completions",
 		}, nil
 	}
 
@@ -167,7 +167,7 @@ func (g *OpenAIGateway) forwardHTTP(ctx context.Context, req *sdk.ForwardRequest
 			}
 			return g.forwardOAuth(ctx, req)
 		}
-		reason := "账号缺少 api_key 或 access_token"
+		reason := "account is missing api_key or access_token"
 		sdk.LoggerFromContext(ctx).Error("forward_dispatch_failed",
 			sdk.LogFieldAccountID, account.ID,
 			sdk.LogFieldReason, reason,
@@ -514,7 +514,7 @@ func (g *OpenAIGateway) forwardAPIKey(ctx context.Context, req *sdk.ForwardReque
 
 	upstreamReq, err := http.NewRequestWithContext(requestCtx, reqMethod, targetURL, bodyReader)
 	if err != nil {
-		reason := fmt.Sprintf("构建上游请求失败: %v", err)
+		reason := fmt.Sprintf("failed to build upstream request: %v", err)
 		logger.Warn("upstream_request_build_failed",
 			sdk.LogFieldAccountID, account.ID,
 			sdk.LogFieldModel, req.Model,
@@ -561,7 +561,7 @@ func (g *OpenAIGateway) forwardAPIKey(ctx context.Context, req *sdk.ForwardReque
 				}
 				return g.handleImagesResponse(mockResp, req.Writer, nil, start, req.Model, parsedImages)
 			}
-			reason := fmt.Sprintf("上游异步任务恢复失败: %v", pollErr)
+			reason := fmt.Sprintf("failed to resume upstream async task: %v", pollErr)
 			logger.Warn("images_async_task_recovery_failed",
 				"upstream_task_id", recoveryID,
 				sdk.LogFieldError, pollErr,
@@ -619,7 +619,7 @@ func (g *OpenAIGateway) forwardAPIKey(ctx context.Context, req *sdk.ForwardReque
 			sdk.LogFieldError, err,
 		)
 		// 网络层错误，无上游 HTTP 响应；client 断开与守卫超时在此分责
-		return upstreamTransportOutcome(ctx, err), fmt.Errorf("请求上游失败: %w", err)
+		return upstreamTransportOutcome(ctx, err), fmt.Errorf("upstream request failed: %w", err)
 	}
 	defer cancel()
 	defer func() { _ = resp.Body.Close() }()
@@ -680,7 +680,7 @@ func (g *OpenAIGateway) forwardAPIKey(ctx context.Context, req *sdk.ForwardReque
 		body, readErr := io.ReadAll(resp.Body)
 		_ = resp.Body.Close()
 		if readErr != nil {
-			reason := fmt.Sprintf("读取 Images 响应失败: %v", readErr)
+			reason := fmt.Sprintf("failed to read Images response: %v", readErr)
 			if sseKA != nil {
 				if downstreamErr := stopSSEPingKeepAlive(sseKA); downstreamErr != nil {
 					return streamAbortedOutcome(downstreamErr, nil, time.Since(start)), nil
@@ -711,7 +711,7 @@ func (g *OpenAIGateway) forwardAPIKey(ctx context.Context, req *sdk.ForwardReque
 
 			finalBody, pollErr := g.pollAsyncImageTask(requestCtx, account, taskID, logger)
 			if pollErr != nil {
-				reason := fmt.Sprintf("异步图片任务轮询失败: %v", pollErr)
+				reason := fmt.Sprintf("async image task polling failed: %v", pollErr)
 				logger.Warn("images_async_task_poll_failed",
 					sdk.LogFieldAccountID, account.ID,
 					sdk.LogFieldModel, req.Model,
@@ -1003,7 +1003,7 @@ func (g *OpenAIGateway) forwardOAuth(ctx context.Context, req *sdk.ForwardReques
 	// 构建 response.create 消息
 	createMsg, err := g.buildWSRequest(req, session)
 	if err != nil {
-		reason := fmt.Sprintf("构建 WebSocket 请求失败: %v", err)
+		reason := fmt.Sprintf("failed to build WebSocket request: %v", err)
 		logger.Warn("ws_build_request_failed",
 			sdk.LogFieldAccountID, account.ID,
 			sdk.LogFieldModel, req.Model,
@@ -1043,7 +1043,7 @@ func (g *OpenAIGateway) forwardOAuth(ctx context.Context, req *sdk.ForwardReques
 
 	runAttempt := func(msg []byte, w http.ResponseWriter) (WSResult, error) {
 		if err := conn.WriteJSON(json.RawMessage(msg)); err != nil {
-			return WSResult{}, fmt.Errorf("发送 WebSocket 消息失败: %w", err)
+			return WSResult{}, fmt.Errorf("failed to send WebSocket message: %w", err)
 		}
 		var handler WSEventHandler
 		switch {
@@ -1195,7 +1195,7 @@ func (g *OpenAIGateway) forwardOAuth(ctx context.Context, req *sdk.ForwardReques
 				err = io.ErrShortWrite
 			}
 			if err != nil {
-				responseWriteErr = newDownstreamWriteError(fmt.Errorf("写入客户端 Chat Completions 响应失败: %w", err))
+				responseWriteErr = newDownstreamWriteError(fmt.Errorf("failed to write Chat Completions response to client: %w", err))
 			}
 		}
 	case !isChatCompletions && !req.Stream:
@@ -1209,7 +1209,7 @@ func (g *OpenAIGateway) forwardOAuth(ctx context.Context, req *sdk.ForwardReques
 				err = io.ErrShortWrite
 			}
 			if err != nil {
-				responseWriteErr = newDownstreamWriteError(fmt.Errorf("写入客户端 Responses 响应失败: %w", err))
+				responseWriteErr = newDownstreamWriteError(fmt.Errorf("failed to write Responses response to client: %w", err))
 			}
 		}
 	default:
@@ -1224,7 +1224,7 @@ func (g *OpenAIGateway) forwardOAuth(ctx context.Context, req *sdk.ForwardReques
 					flusher.Flush()
 				}
 			} else {
-				responseWriteErr = newDownstreamWriteError(fmt.Errorf("写入客户端 Responses 完成标记失败: %w", err))
+				responseWriteErr = newDownstreamWriteError(fmt.Errorf("failed to write Responses completion marker to client: %w", err))
 			}
 		}
 	}
@@ -1342,7 +1342,7 @@ func (s *sseEventWriter) writePayload(payload string) {
 		err = io.ErrShortWrite
 	}
 	if err != nil {
-		s.err = newDownstreamWriteError(fmt.Errorf("写入客户端 Responses 流失败: %w", err))
+		s.err = newDownstreamWriteError(fmt.Errorf("failed to write Responses stream to client: %w", err))
 		return
 	}
 	if s.flusher != nil {

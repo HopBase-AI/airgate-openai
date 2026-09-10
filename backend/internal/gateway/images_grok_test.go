@@ -168,7 +168,7 @@ func TestValidatePerUnitImagesRequest(t *testing.T) {
 		{"基础版 2k 放行", specBase, &imagesRequest{Resolution: "2k"}, ""},
 		{"mask 拒绝", spec20, &imagesRequest{Mask: "data:image/png;base64,x"}, "mask"},
 		{"两张输入图放行", spec20, &imagesRequest{Images: []string{"https://a", "https://b"}}, ""},
-		{"三张输入图拒绝", spec20, &imagesRequest{Images: []string{"https://a", "https://b", "https://c"}}, "输入图"},
+		{"三张输入图拒绝", spec20, &imagesRequest{Images: []string{"https://a", "https://b", "https://c"}}, "input images"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

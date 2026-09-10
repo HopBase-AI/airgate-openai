@@ -79,7 +79,7 @@ func (g *OpenAIGateway) forwardAPIKeyImagesViaResponsesTool(ctx context.Context,
 	targetURL := buildAPIKeyURL(account, "/v1/responses")
 	upstreamReq, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(responsesBody))
 	if err != nil {
-		reason := fmt.Sprintf("构建上游 Responses 生图请求失败: %v", err)
+		reason := fmt.Sprintf("failed to build upstream Responses image request: %v", err)
 		return transientOutcome(reason), fmt.Errorf("%s", reason)
 	}
 	setAuthHeaders(upstreamReq, account)
@@ -103,13 +103,13 @@ func (g *OpenAIGateway) forwardAPIKeyImagesViaResponsesTool(ctx context.Context,
 			sdk.LogFieldModel, req.Model,
 			sdk.LogFieldError, err,
 		)
-		return upstreamTransportOutcome(ctx, err), fmt.Errorf("请求上游失败: %w", err)
+		return upstreamTransportOutcome(ctx, err), fmt.Errorf("upstream request failed: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	body, readErr := io.ReadAll(resp.Body)
 	if readErr != nil {
-		reason := fmt.Sprintf("读取 Responses 生图响应失败: %v", readErr)
+		reason := fmt.Sprintf("failed to read Responses image response: %v", readErr)
 		return transientOutcome(reason), fmt.Errorf("%s", reason)
 	}
 	if resp.StatusCode >= 400 {
@@ -124,7 +124,7 @@ func (g *OpenAIGateway) forwardAPIKeyImagesViaResponsesTool(ctx context.Context,
 
 	wsResult := imageGenCallsFromResponsesBody(body)
 	if len(wsResult.ImageGenCalls) == 0 {
-		reason := "Responses 生图响应中没有 completed image_generation_call.result"
+		reason := "Responses image response has no completed image_generation_call.result"
 		logger.Warn("responses_tool_image_result_empty",
 			sdk.LogFieldAccountID, account.ID,
 			sdk.LogFieldModel, req.Model,

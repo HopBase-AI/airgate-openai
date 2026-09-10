@@ -95,7 +95,7 @@ func (c *Client) asyncStatus(conversationID string) (*AsyncStatusResult, error) 
 		} `json:"tasks"`
 	}
 	if err := json.Unmarshal(body, &raw); err != nil {
-		return nil, fmt.Errorf("async-status 响应解析失败: %w，body=%s", err, body)
+		return nil, fmt.Errorf("failed to parse async-status response: %w, body=%s", err, body)
 	}
 
 	r := &AsyncStatusResult{RawStatus: raw.Status}
@@ -239,7 +239,7 @@ func (c *Client) pollForImages(conversationID string, maxAttempts int) ([]string
 	}
 
 	logger.Warn("imgen_poll_timeout", "max_attempts", maxAttempts)
-	return nil, fmt.Errorf("轮询 %d 次未拿到图片 asset_pointer", maxAttempts)
+	return nil, fmt.Errorf("no image asset_pointer after %d poll attempts", maxAttempts)
 }
 
 func (c *Client) readMappingRefsAndModel(conversationID string) ([]string, string) {

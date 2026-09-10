@@ -313,7 +313,7 @@ func (g *OpenAIGateway) forwardAnthropicResponses(
 
 	upstreamReq, err := g.buildAnthropicUpstreamRequest(ctx, req, account, responsesBody, session)
 	if err != nil {
-		reason := fmt.Sprintf("构建上游请求失败: %v", err)
+		reason := fmt.Sprintf("failed to build upstream request: %v", err)
 		logger.Warn("upstream_request_build_failed",
 			sdk.LogFieldAccountID, account.ID,
 			sdk.LogFieldModel, mappedModel,
@@ -354,7 +354,7 @@ func (g *OpenAIGateway) forwardAnthropicResponses(
 			sdk.LogFieldError, err,
 			"protocol", "anthropic",
 		)
-		return upstreamTransportOutcome(ctx, err), nil, fmt.Errorf("请求上游失败: %w", err)
+		return upstreamTransportOutcome(ctx, err), nil, fmt.Errorf("upstream request failed: %w", err)
 	}
 	defer cancel()
 	defer func() { _ = resp.Body.Close() }()
@@ -512,14 +512,14 @@ func (g *OpenAIGateway) handleAnthropicNonStreamFromResponses(
 		return transientOutcome(wsResult.Err.Error()), wsResult.Err
 	}
 	if len(wsResult.CompletedEventRaw) == 0 {
-		reason := "未收到 response.completed 事件"
+		reason := "response.completed event was not received"
 		return transientOutcome(reason), fmt.Errorf("%s", reason)
 	}
 
 	// 客户端响应体使用原始 Claude 模型名；传入 wsResult 兜底用 delta 累积
 	anthropicJSON := convertResponsesCompletedToAnthropicJSON(wsResult.CompletedEventRaw, originalRequest, model, &wsResult)
 	if anthropicJSON == "" {
-		reason := "responses 非流回译失败"
+		reason := "failed to translate non-streaming responses payload"
 		return transientOutcome(reason), fmt.Errorf("%s", reason)
 	}
 	if session.SessionKey != "" && wsResult.ResponseID != "" {
@@ -614,7 +614,7 @@ func (g *OpenAIGateway) writeAnthropicUpstreamError(
 	}
 
 	if kind == sdk.OutcomeAccountRateLimited || kind == sdk.OutcomeAccountDead || kind == sdk.OutcomeUpstreamTransient {
-		return outcome, fmt.Errorf("上游返回 %d: %s", statusCode, errMsg)
+		return outcome, fmt.Errorf("upstream returned %d: %s", statusCode, errMsg)
 	}
 	return outcome, nil
 }

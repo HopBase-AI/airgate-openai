@@ -553,7 +553,7 @@ func hasImageGenerationTool(body []byte) bool {
 func buildCodexWSRequest(body []byte, model string, session openAISessionResolution) ([]byte, error) {
 	var reqData map[string]any
 	if err := json.Unmarshal(body, &reqData); err != nil {
-		return nil, fmt.Errorf("解析请求体失败: %w", err)
+		return nil, fmt.Errorf("failed to parse request body: %w", err)
 	}
 	reqData = applyContinuationState(reqData, session)
 
@@ -594,7 +594,7 @@ func buildSimulatedWSRequest(body []byte, model string, session openAISessionRes
 
 	var reqData map[string]any
 	if err := json.Unmarshal(wrapped, &reqData); err != nil {
-		return nil, fmt.Errorf("解析包装后请求体失败: %w", err)
+		return nil, fmt.Errorf("failed to parse wrapped request body: %w", err)
 	}
 	reqData = applyContinuationState(reqData, session)
 

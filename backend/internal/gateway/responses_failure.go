@@ -58,18 +58,18 @@ func (e *responsesFailureError) Error() string {
 	}
 	switch e.Kind {
 	case responsesFailureKindContinuationAnchor:
-		return "上游续链锚点失效: " + e.Message
+		return "upstream continuation anchor is no longer valid: " + e.Message
 	case responsesFailureKindClient:
-		return "上游请求无效: " + e.Message
+		return "upstream rejected the request as invalid: " + e.Message
 	case responsesFailureKindRateLimited:
 		if e.RetryAfter > 0 {
-			return fmt.Sprintf("上游速率限制(建议 %s 后重试): %s", e.RetryAfter, e.Message)
+			return fmt.Sprintf("upstream rate limited (retry after %s): %s", e.RetryAfter, e.Message)
 		}
-		return "上游速率限制: " + e.Message
+		return "upstream rate limited: " + e.Message
 	case responsesFailureKindAccountDead:
-		return "上游账号凭证失效: " + e.Message
+		return "upstream account credentials are invalid: " + e.Message
 	default:
-		return "上游错误: " + e.Message
+		return "upstream error: " + e.Message
 	}
 }
 
@@ -90,7 +90,7 @@ func classifyResponsesFailure(data []byte) *responsesFailureError {
 	errNode := gjson.GetBytes(data, "response.error")
 	msg := strings.TrimSpace(errNode.Get("message").String())
 	if msg == "" {
-		msg = "上游返回 response.failed"
+		msg = "upstream returned response.failed"
 	}
 	errType := strings.ToLower(strings.TrimSpace(errNode.Get("type").String()))
 	errCode := strings.ToLower(strings.TrimSpace(errNode.Get("code").String()))

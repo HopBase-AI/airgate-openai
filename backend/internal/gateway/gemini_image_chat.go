@@ -77,7 +77,7 @@ func (g *OpenAIGateway) forwardAPIKeyGeminiImageViaChat(ctx context.Context, req
 	targetURL := buildAPIKeyURL(account, "/v1/chat/completions")
 	upstreamReq, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(chatBody))
 	if err != nil {
-		reason := fmt.Sprintf("构建上游请求失败: %v", err)
+		reason := fmt.Sprintf("failed to build upstream request: %v", err)
 		return transientOutcome(reason), fmt.Errorf("%s", reason)
 	}
 	setAuthHeaders(upstreamReq, account)
@@ -98,14 +98,14 @@ func (g *OpenAIGateway) forwardAPIKeyGeminiImageViaChat(ctx context.Context, req
 			sdk.LogFieldModel, modelName,
 			sdk.LogFieldError, err,
 		)
-		return upstreamTransportOutcome(ctx, err), fmt.Errorf("请求上游失败: %w", err)
+		return upstreamTransportOutcome(ctx, err), fmt.Errorf("upstream request failed: %w", err)
 	}
 	defer cancel()
 	defer func() { _ = resp.Body.Close() }()
 
 	body, readErr := io.ReadAll(resp.Body)
 	if readErr != nil {
-		reason := fmt.Sprintf("读取 Gemini 图片响应失败: %v", readErr)
+		reason := fmt.Sprintf("failed to read Gemini image response: %v", readErr)
 		return transientOutcome(reason), fmt.Errorf("%s", reason)
 	}
 	if resp.StatusCode >= 400 {
@@ -126,7 +126,7 @@ func (g *OpenAIGateway) forwardAPIKeyGeminiImageViaChat(ctx context.Context, req
 
 	imagesBody, convErr := convertGeminiImageChatResponseToImages(body, modelName, imgReq)
 	if convErr != nil {
-		reason := "上游响应中未包含可用图片: " + convErr.Error()
+		reason := "upstream response contains no usable image: " + convErr.Error()
 		logger.Warn("gemini_image_chat_convert_failed",
 			sdk.LogFieldAccountID, account.ID,
 			sdk.LogFieldModel, modelName,
@@ -156,10 +156,10 @@ func (g *OpenAIGateway) forwardAPIKeyGeminiImageViaChat(ctx context.Context, req
 
 func buildGeminiImageChatRequestBody(modelName string, req *imagesRequest) ([]byte, error) {
 	if strings.TrimSpace(modelName) == "" {
-		return nil, fmt.Errorf("model 不能为空")
+		return nil, fmt.Errorf("model must not be empty")
 	}
 	if req != nil && strings.TrimSpace(req.Mask) != "" {
-		return nil, fmt.Errorf("暂不支持 mask 蒙版（Gemini 图片模型），请去掉 mask，用文字描述要修改的区域")
+		return nil, fmt.Errorf("mask is not supported for Gemini image models; remove mask and describe the region to edit in the prompt")
 	}
 	prompt := buildGeminiImageChatPrompt(req)
 	var content any = prompt

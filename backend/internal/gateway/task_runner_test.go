@@ -10,28 +10,28 @@ func TestSanitizeTaskMessage(t *testing.T) {
 	}{
 		{
 			name: "invalid request keeps raw message",
-			task: &TaskError{Type: "invalid_request", Message: "模型不支持该尺寸"},
-			want: "模型不支持该尺寸",
+			task: &TaskError{Type: "invalid_request", Message: "model does not support this size"},
+			want: "model does not support this size",
 		},
 		{
 			name: "rate limited is generic",
 			task: &TaskError{Type: "rate_limited", Message: "The usage limit has been reached"},
-			want: "当前请求过多，请稍后重试",
+			want: "too many requests, please retry later",
 		},
 		{
 			name: "auth error is generic",
 			task: &TaskError{Type: "auth_error", Message: "token invalid"},
-			want: "账号认证失败，请联系管理员",
+			want: "account authentication failed, please contact the administrator",
 		},
 		{
 			name: "upstream error is generic",
 			task: &TaskError{Type: "upstream_error", Message: "server exploded"},
-			want: "请求暂时无法完成，请稍后重试",
+			want: "the request could not be completed right now, please retry later",
 		},
 		{
 			name: "grpc desc is extracted",
-			task: &TaskError{Type: "upstream_error", Message: "rpc error: code = Unknown desc = 原因详述"},
-			want: "原因详述",
+			task: &TaskError{Type: "upstream_error", Message: "rpc error: code = Unknown desc = detailed reason"},
+			want: "detailed reason",
 		},
 	}
 

@@ -48,7 +48,7 @@ type storedAssetRef struct {
 
 func (g *OpenAIGateway) hostInvoke(ctx context.Context, method string, payload map[string]interface{}) (map[string]interface{}, error) {
 	if g.host == nil {
-		return nil, fmt.Errorf("core host 未启用")
+		return nil, fmt.Errorf("core host is not enabled")
 	}
 	resp, err := g.host.Invoke(ctx, sdk.HostInvokeRequest{
 		Method:  method,
@@ -64,7 +64,7 @@ func (g *OpenAIGateway) hostInvoke(ctx context.Context, method string, payload m
 		if msg, _ := resp.Payload["message"].(string); msg != "" {
 			return nil, fmt.Errorf("%s", msg)
 		}
-		return nil, fmt.Errorf("core 方法 %s 返回错误", method)
+		return nil, fmt.Errorf("core method %s returned an error", method)
 	}
 	return resp.Payload, nil
 }
@@ -72,7 +72,7 @@ func (g *OpenAIGateway) hostInvoke(ctx context.Context, method string, payload m
 func (g *OpenAIGateway) createHostTask(ctx context.Context, taskType string, userID int64, input map[string]interface{}, attributes map[string]string, priority, maxAttempts int) (*sdk.HostTask, error) {
 	publicTaskID, err := uuid.NewV7()
 	if err != nil {
-		return nil, fmt.Errorf("生成任务 UUIDv7 失败: %w", err)
+		return nil, fmt.Errorf("failed to generate task UUIDv7: %w", err)
 	}
 	payload := map[string]interface{}{
 		"plugin_id":      PluginID,
@@ -243,7 +243,7 @@ func (g *OpenAIGateway) fetchAssetBytes(ctx context.Context, objectKey string) (
 		}
 		return data, contentType, nil
 	default:
-		return nil, "", fmt.Errorf("assets.get_bytes 返回的 data 类型无效: %T", raw)
+		return nil, "", fmt.Errorf("assets.get_bytes returned an invalid data type: %T", raw)
 	}
 }
 
@@ -280,7 +280,7 @@ func firstPayloadValue(payload map[string]interface{}, keys ...string) interface
 func hostTaskFromPayload(value interface{}) (*sdk.HostTask, error) {
 	m, ok := mapFromAny(value)
 	if !ok {
-		return nil, fmt.Errorf("core 返回的任务结构无效")
+		return nil, fmt.Errorf("core returned an invalid task structure")
 	}
 	task := &sdk.HostTask{
 		ID:           int64FromAny(firstPayloadValue(m, "id", "task_id")),

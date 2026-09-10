@@ -35,7 +35,7 @@ func (c *Client) downloadImage(conversationID, ref string) ([]byte, error) {
 		sedID := strings.TrimPrefix(ref, "sediment://")
 		return c.downloadByJSONLink("/backend-api/conversation/" + conversationID + "/attachment/" + sedID + "/download")
 	default:
-		return nil, fmt.Errorf("未知引用格式: %s", ref)
+		return nil, fmt.Errorf("unknown reference format: %s", ref)
 	}
 }
 
@@ -58,7 +58,7 @@ func (c *Client) downloadFileService(conversationID, fileID string) ([]byte, err
 		loc := resp.Header.Get("Location")
 		_ = resp.Body.Close()
 		if loc == "" {
-			return nil, fmt.Errorf("files/download 返回 %d 但 Location 为空", resp.StatusCode)
+			return nil, fmt.Errorf("files/download returned %d but Location is empty", resp.StatusCode)
 		}
 		return c.fetchBinary(loc)
 	}
@@ -100,7 +100,7 @@ func (c *Client) downloadByJSONLink(path string) ([]byte, error) {
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != 200 {
 		b, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("获取下载链接失败 HTTP %d: %s", resp.StatusCode, b)
+		return nil, fmt.Errorf("failed to get download URL: HTTP %d: %s", resp.StatusCode, b)
 	}
 	var dl struct {
 		DownloadURL string `json:"download_url"`
@@ -109,7 +109,7 @@ func (c *Client) downloadByJSONLink(path string) ([]byte, error) {
 		return nil, err
 	}
 	if dl.DownloadURL == "" {
-		return nil, fmt.Errorf("下载链接为空")
+		return nil, fmt.Errorf("download URL is empty")
 	}
 	return c.fetchBinary(dl.DownloadURL)
 }
@@ -134,7 +134,7 @@ func (c *Client) fetchBinary(targetURL string) ([]byte, error) {
 	defer func() { _ = imgResp.Body.Close() }()
 	if imgResp.StatusCode != 200 {
 		b, _ := io.ReadAll(imgResp.Body)
-		return nil, fmt.Errorf("下载图片失败 HTTP %d: %s", imgResp.StatusCode, b)
+		return nil, fmt.Errorf("failed to download image: HTTP %d: %s", imgResp.StatusCode, b)
 	}
 	return io.ReadAll(imgResp.Body)
 }

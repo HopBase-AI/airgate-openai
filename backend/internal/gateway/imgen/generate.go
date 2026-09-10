@@ -39,7 +39,7 @@ type Result struct {
 func (c *Client) GenerateImage(ctx context.Context, prompt string, images []ImageInput) (*Result, error) {
 	prompt = strings.TrimSpace(prompt)
 	if prompt == "" {
-		return nil, fmt.Errorf("prompt 为空")
+		return nil, fmt.Errorf("prompt is empty")
 	}
 
 	logger := sdk.LoggerFromContext(ctx)
@@ -76,7 +76,7 @@ func (c *Client) GenerateImage(ctx context.Context, prompt string, images []Imag
 		}
 		uf, err := c.uploadFile(img)
 		if err != nil {
-			return nil, fmt.Errorf("上传第 %d 张图片失败: %w", i+1, err)
+			return nil, fmt.Errorf("failed to upload image %d: %w", i+1, err)
 		}
 		uploaded = append(uploaded, uf)
 	}
@@ -88,7 +88,7 @@ func (c *Client) GenerateImage(ctx context.Context, prompt string, images []Imag
 	// Step 1: chat requirements
 	cr, err := c.getChatRequirements()
 	if err != nil {
-		return nil, fmt.Errorf("获取 chat token 失败: %w", err)
+		return nil, fmt.Errorf("failed to get chat token: %w", err)
 	}
 
 	if err := ctx.Err(); err != nil {
@@ -108,7 +108,7 @@ func (c *Client) GenerateImage(ctx context.Context, prompt string, images []Imag
 	// Step 3: SSE 流式对话
 	sr, err := c.streamConversation(prompt, cr.ChatToken, conduitToken, cr.ProofToken, "", "", uploaded)
 	if err != nil {
-		return nil, fmt.Errorf("流式会话失败: %w", err)
+		return nil, fmt.Errorf("streaming conversation failed: %w", err)
 	}
 
 	// Step 4: 定位 asset_pointer
@@ -120,7 +120,7 @@ func (c *Client) GenerateImage(ctx context.Context, prompt string, images []Imag
 	case sr.ConversationID != "":
 		refs, perr := c.pollForImages(sr.ConversationID, imagePollAttempts("gpt-image-2"))
 		if perr != nil {
-			return nil, fmt.Errorf("轮询失败: %w", perr)
+			return nil, fmt.Errorf("polling failed: %w", perr)
 		}
 		if fs := filterFileService(refs); len(fs) > 0 {
 			imageRefs = fs
@@ -132,7 +132,7 @@ func (c *Client) GenerateImage(ctx context.Context, prompt string, images []Imag
 	}
 
 	if len(imageRefs) == 0 {
-		return nil, fmt.Errorf("未获取到任何图片（可能原因: PoW 未通过 / AT 过期 / 触发风控）")
+		return nil, fmt.Errorf("no image was returned (possible causes: PoW failed / auth token expired / risk control triggered)")
 	}
 
 	modelSlug := ""
@@ -166,7 +166,7 @@ func (c *Client) GenerateImage(ctx context.Context, prompt string, images []Imag
 	}
 
 	if len(result.Images) == 0 {
-		return result, fmt.Errorf("所有图片下载均失败")
+		return result, fmt.Errorf("all image downloads failed")
 	}
 	logger.Debug("imgen_generate_completed",
 		"image_count", len(result.Images),

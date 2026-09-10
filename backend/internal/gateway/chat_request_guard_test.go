@@ -23,14 +23,14 @@ func TestRejectInvalidChatMessagesTable(t *testing.T) {
 		wantReject bool
 		wantPart   string
 	}{
-		{"空数组拒绝", "POST", "/v1/chat/completions", `{"model":"glm-5.3","messages":[]}`, true, "不能为空"},
-		{"缺字段拒绝", "POST", "/v1/chat/completions", `{"model":"glm-5.3"}`, true, "缺少 messages"},
-		{"正常请求放行", "POST", "/v1/chat/completions", `{"model":"glm-5.3","messages":[{"role":"user","content":"hi"}]}`, false, ""},
-		{"messages 非数组拒绝", "POST", "/v1/chat/completions", `{"model":"glm-5.3","messages":"hi"}`, true, "不能为空"},
-		{"非 chat 路径不管", "POST", "/v1/responses", `{"model":"gpt-5.6","input":"hi"}`, false, ""},
-		{"GET 不管", "GET", "/v1/chat/completions", `{}`, false, ""},
-		{"非 JSON 交上游", "POST", "/v1/chat/completions", `not-json`, false, ""},
-		{"空体交上游", "POST", "/v1/chat/completions", ``, false, ""},
+		{"empty array rejected", "POST", "/v1/chat/completions", `{"model":"glm-5.3","messages":[]}`, true, "must not be an empty array"},
+		{"missing field rejected", "POST", "/v1/chat/completions", `{"model":"glm-5.3"}`, true, "missing messages"},
+		{"valid request passes", "POST", "/v1/chat/completions", `{"model":"glm-5.3","messages":[{"role":"user","content":"hi"}]}`, false, ""},
+		{"non-array messages rejected", "POST", "/v1/chat/completions", `{"model":"glm-5.3","messages":"hi"}`, true, "must not be an empty array"},
+		{"non-chat path ignored", "POST", "/v1/responses", `{"model":"gpt-5.6","input":"hi"}`, false, ""},
+		{"GET ignored", "GET", "/v1/chat/completions", `{}`, false, ""},
+		{"non-JSON passed to upstream", "POST", "/v1/chat/completions", `not-json`, false, ""},
+		{"empty body passed to upstream", "POST", "/v1/chat/completions", ``, false, ""},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			outcome, rejected := rejectInvalidChatMessages(&sdk.ForwardRequest{Body: []byte(tt.body)},

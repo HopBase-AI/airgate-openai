@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-var errInternalImageRefAddr = fmt.Errorf("参考图 URL 不允许指向内部地址")
+var errInternalImageRefAddr = fmt.Errorf("reference image URL must not point to an internal address")
 
 // allowInternalImageRefAddrs 仅测试用:httptest 上游全在环回地址上。
 var allowInternalImageRefAddrs = false

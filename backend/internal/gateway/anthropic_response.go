@@ -721,14 +721,14 @@ func translateResponsesSSEToAnthropicSSE(
 				} else {
 					errMsg := gjson.Get(data, "response.error.message").String()
 					if errMsg == "" {
-						errMsg = "上游返回 response.failed"
+						errMsg = "upstream returned response.failed"
 					}
-					streamErr = fmt.Errorf("上游错误: %s", errMsg)
+					streamErr = fmt.Errorf("upstream error: %s", errMsg)
 				}
 			}
 			if eventType == "response.incomplete" {
 				reason := gjson.Get(data, "response.incomplete_details.reason").String()
-				streamErr = fmt.Errorf("响应不完整: %s", reason)
+				streamErr = fmt.Errorf("incomplete response: %s", reason)
 			}
 		}
 
@@ -771,7 +771,7 @@ func translateResponsesSSEToAnthropicSSE(
 				)
 			}
 			if err := writeResponsePayload(w, []byte(output)); err != nil {
-				streamErr = newDownstreamWriteError(fmt.Errorf("写入客户端 Anthropic SSE 失败: %w", err))
+				streamErr = newDownstreamWriteError(fmt.Errorf("failed to write Anthropic SSE to client: %w", err))
 				_ = resp.Body.Close()
 				goto done
 			}
@@ -788,7 +788,7 @@ func translateResponsesSSEToAnthropicSSE(
 
 done:
 	if err := scanner.Err(); err != nil && streamErr == nil {
-		streamErr = fmt.Errorf("读取上游 SSE 失败: %w", err)
+		streamErr = fmt.Errorf("failed to read upstream SSE: %w", err)
 	}
 
 	elapsed := time.Since(start)

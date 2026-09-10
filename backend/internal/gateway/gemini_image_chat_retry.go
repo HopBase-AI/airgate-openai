@@ -57,7 +57,7 @@ func (g *OpenAIGateway) forwardAPIKeyGeminiImageChat(ctx context.Context, req *s
 	for attempt := 1; attempt <= geminiImageChatMaxAttempts; attempt++ {
 		upstreamReq, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(upstreamBody))
 		if err != nil {
-			reason := fmt.Sprintf("构建上游请求失败: %v", err)
+			reason := fmt.Sprintf("failed to build upstream request: %v", err)
 			return transientOutcome(reason), fmt.Errorf("%s", reason)
 		}
 		setAuthHeaders(upstreamReq, account)
@@ -67,7 +67,7 @@ func (g *OpenAIGateway) forwardAPIKeyGeminiImageChat(ctx context.Context, req *s
 
 		resp, cancel, err := g.doStreamableUpstream(ctx, upstreamReq, account, false)
 		if err != nil {
-			return upstreamTransportOutcome(ctx, err), fmt.Errorf("请求上游失败: %w", err)
+			return upstreamTransportOutcome(ctx, err), fmt.Errorf("upstream request failed: %w", err)
 		}
 		respBody, readErr := io.ReadAll(resp.Body)
 		respHeader = resp.Header.Clone()
@@ -75,7 +75,7 @@ func (g *OpenAIGateway) forwardAPIKeyGeminiImageChat(ctx context.Context, req *s
 		_ = resp.Body.Close()
 		cancel()
 		if readErr != nil {
-			reason := fmt.Sprintf("读取上游响应失败: %v", readErr)
+			reason := fmt.Sprintf("failed to read upstream response: %v", readErr)
 			return transientOutcome(reason), fmt.Errorf("%s", reason)
 		}
 		if statusCode >= 400 {

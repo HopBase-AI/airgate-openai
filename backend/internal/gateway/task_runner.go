@@ -74,7 +74,7 @@ func sanitizeTaskMessage(taskErr *TaskError) string {
 		}
 		return userFriendlyFallback(taskErr.Type)
 	}
-	if strings.Contains(msg, "upstream 转发失败") {
+	if strings.Contains(msg, "upstream forward failed") {
 		return userFriendlyFallback(taskErr.Type)
 	}
 	if taskErr.Type == "invalid_request" {
@@ -86,11 +86,11 @@ func sanitizeTaskMessage(taskErr *TaskError) string {
 func userFriendlyFallback(errType string) string {
 	switch errType {
 	case "rate_limited":
-		return "当前请求过多，请稍后重试"
+		return "too many requests, please retry later"
 	case "auth_error":
-		return "账号认证失败，请联系管理员"
+		return "account authentication failed, please contact the administrator"
 	default:
-		return "请求暂时无法完成，请稍后重试"
+		return "the request could not be completed right now, please retry later"
 	}
 }
 
@@ -111,7 +111,7 @@ func (g *OpenAIGateway) TaskTypes() []string {
 func (g *OpenAIGateway) ProcessTask(ctx context.Context, task sdk.HostTask) error {
 	handler := g.tasks.Get(task.TaskType)
 	if handler == nil {
-		return fmt.Errorf("不支持的任务类型: %s", task.TaskType)
+		return fmt.Errorf("unsupported task type: %s", task.TaskType)
 	}
 
 	logger := g.logger.With("task_id", task.ID, "task_type", task.TaskType)
@@ -151,7 +151,7 @@ func (g *OpenAIGateway) forwardTask(ctx context.Context, req *sdk.ForwardRequest
 	input, attributes, err := handler.BuildInput(req, reqPath)
 	if err != nil {
 		logger.Error("task_build_input_failed", sdk.LogFieldError, err)
-		body := jsonError("创建任务失败: " + err.Error())
+		body := jsonError("failed to create task: " + err.Error())
 		if req.Writer != nil {
 			req.Writer.Header().Set("Content-Type", "application/json")
 			req.Writer.WriteHeader(http.StatusBadRequest)
@@ -168,7 +168,7 @@ func (g *OpenAIGateway) forwardTask(ctx context.Context, req *sdk.ForwardRequest
 	task, err := g.createHostTask(ctx, handler.Type(), userID, input, attributes, 0, 3)
 	if err != nil {
 		logger.Error("task_create_failed", sdk.LogFieldError, err)
-		body := jsonError("创建任务失败: " + err.Error())
+		body := jsonError("failed to create task: " + err.Error())
 		if req.Writer != nil {
 			req.Writer.Header().Set("Content-Type", "application/json")
 			req.Writer.WriteHeader(http.StatusInternalServerError)
@@ -177,7 +177,7 @@ func (g *OpenAIGateway) forwardTask(ctx context.Context, req *sdk.ForwardRequest
 		return sdk.ForwardOutcome{
 			Kind:     sdk.OutcomeUpstreamTransient,
 			Upstream: sdk.UpstreamResponse{StatusCode: http.StatusInternalServerError, Body: body},
-			Reason:   "创建任务失败",
+			Reason:   "failed to create task",
 		}, nil
 	}
 
@@ -232,7 +232,7 @@ func isTaskExecution(headers http.Header) bool {
 func (g *OpenAIGateway) handleTaskQuery(ctx context.Context, req *sdk.ForwardRequest, handler TaskHandler) (sdk.ForwardOutcome, error) {
 	taskIDStr := imageTaskIDFromRequest(req)
 	if taskIDStr == "" {
-		return writeJSONOutcome(req.Writer, http.StatusBadRequest, sdk.OutcomeClientError, jsonError("缺少有效的 task_id 参数")), nil
+		return writeJSONOutcome(req.Writer, http.StatusBadRequest, sdk.OutcomeClientError, jsonError("missing or invalid task_id parameter")), nil
 	}
 
 	userID, _ := strconv.ParseInt(req.Headers.Get("X-Airgate-User-ID"), 10, 64)
@@ -243,14 +243,14 @@ func (g *OpenAIGateway) handleTaskQuery(ctx context.Context, req *sdk.ForwardReq
 	if isNumeric(taskIDStr) {
 		taskID, parseErr := strconv.ParseInt(taskIDStr, 10, 64)
 		if parseErr != nil || taskID <= 0 {
-			return writeJSONOutcome(req.Writer, http.StatusBadRequest, sdk.OutcomeClientError, jsonError("缺少有效的 task_id 参数")), nil
+			return writeJSONOutcome(req.Writer, http.StatusBadRequest, sdk.OutcomeClientError, jsonError("missing or invalid task_id parameter")), nil
 		}
 		task, err = g.getHostTask(ctx, userID, taskID)
 	} else {
 		task, err = g.getHostTaskByPublicTaskID(ctx, userID, taskIDStr)
 	}
 	if err != nil {
-		return writeJSONOutcome(req.Writer, http.StatusInternalServerError, sdk.OutcomeUpstreamTransient, jsonError("查询任务失败: "+err.Error())), nil
+		return writeJSONOutcome(req.Writer, http.StatusInternalServerError, sdk.OutcomeUpstreamTransient, jsonError("failed to query task: "+err.Error())), nil
 	}
 
 	respBody, _ := json.Marshal(handler.BuildResponse(task))
@@ -281,7 +281,7 @@ func imageTaskIDFromRequest(req *sdk.ForwardRequest) string {
 func (g *OpenAIGateway) handleTaskList(ctx context.Context, req *sdk.ForwardRequest, handler TaskHandler) (sdk.ForwardOutcome, error) {
 	userID, _ := strconv.ParseInt(req.Headers.Get("X-Airgate-User-ID"), 10, 64)
 	if userID <= 0 {
-		return writeJSONOutcome(req.Writer, http.StatusBadRequest, sdk.OutcomeClientError, jsonError("缺少用户信息")), nil
+		return writeJSONOutcome(req.Writer, http.StatusBadRequest, sdk.OutcomeClientError, jsonError("missing user information")), nil
 	}
 
 	limit, offset, status := 20, 0, ""
@@ -308,7 +308,7 @@ func (g *OpenAIGateway) handleTaskList(ctx context.Context, req *sdk.ForwardRequ
 
 	result, err := g.listHostTasks(ctx, userID, handler.Type(), status, limit, offset)
 	if err != nil {
-		return writeJSONOutcome(req.Writer, http.StatusInternalServerError, sdk.OutcomeUpstreamTransient, jsonError("查询任务列表失败: "+err.Error())), nil
+		return writeJSONOutcome(req.Writer, http.StatusInternalServerError, sdk.OutcomeUpstreamTransient, jsonError("failed to list tasks: "+err.Error())), nil
 	}
 
 	tasks := make([]map[string]any, 0, len(result.Tasks))

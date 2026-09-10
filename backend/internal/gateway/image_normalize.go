@@ -309,7 +309,7 @@ func normalizeImagesEditMultipartBody(body []byte, contentType string) ([]byte, 
 			break
 		}
 		if nextErr != nil {
-			return nil, false, fmt.Errorf("multipart 读取失败: %w", nextErr)
+			return nil, false, fmt.Errorf("failed to read multipart body: %w", nextErr)
 		}
 		header := make(textproto.MIMEHeader, len(part.Header))
 		for key, values := range part.Header {
@@ -318,7 +318,7 @@ func normalizeImagesEditMultipartBody(body []byte, contentType string) ([]byte, 
 		data, readErr := io.ReadAll(part)
 		_ = part.Close()
 		if readErr != nil {
-			return nil, false, fmt.Errorf("multipart part %q 读取失败: %w", part.FormName(), readErr)
+			return nil, false, fmt.Errorf("failed to read multipart part %q: %w", part.FormName(), readErr)
 		}
 		if name := part.FormName(); name == "image" || name == "image[]" {
 			if normalized, mimeOut, changed := normalizeReferenceImage(data, header.Get("Content-Type")); changed {
@@ -331,14 +331,14 @@ func normalizeImagesEditMultipartBody(body []byte, contentType string) ([]byte, 
 		}
 		dst, createErr := writer.CreatePart(header)
 		if createErr != nil {
-			return nil, false, fmt.Errorf("multipart part %q 重建失败: %w", part.FormName(), createErr)
+			return nil, false, fmt.Errorf("failed to rebuild multipart part %q: %w", part.FormName(), createErr)
 		}
 		if _, writeErr := dst.Write(data); writeErr != nil {
-			return nil, false, fmt.Errorf("multipart part %q 写入失败: %w", part.FormName(), writeErr)
+			return nil, false, fmt.Errorf("failed to write multipart part %q: %w", part.FormName(), writeErr)
 		}
 	}
 	if err := writer.Close(); err != nil {
-		return nil, false, fmt.Errorf("multipart 请求结束失败: %w", err)
+		return nil, false, fmt.Errorf("failed to finalize multipart request: %w", err)
 	}
 	if !changedAny {
 		return body, false, nil

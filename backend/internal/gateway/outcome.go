@@ -88,11 +88,11 @@ func failureOutcome(statusCode int, body []byte, headers http.Header, message st
 func webSocketHandshakeFailureOutcome(resp *http.Response, err error) sdk.ForwardOutcome {
 	if resp == nil {
 		if err == nil {
-			return transientOutcome("WebSocket 握手失败")
+			return transientOutcome("WebSocket handshake failed")
 		}
 		return transientOutcome(err.Error())
 	}
-	message := "WebSocket 握手失败"
+	message := "WebSocket handshake failed"
 	if err != nil {
 		message = err.Error()
 	}
@@ -161,12 +161,14 @@ func transientOutcome(reason string) sdk.ForwardOutcome {
 func upstreamTransportOutcome(ctx context.Context, err error) sdk.ForwardOutcome {
 	if err != nil && errors.Is(err, context.Canceled) {
 		if ctx != nil && ctx.Err() != nil {
-			return streamAbortedOutcome(fmt.Errorf("客户端在上游请求完成前断开连接: %w", err), nil, 0)
+			return streamAbortedOutcome(fmt.Errorf("client disconnected before the upstream request completed: %w", err), nil, 0)
 		}
-		return transientOutcome("上游首字节或流停滞超时（插件守卫断开）: " + err.Error())
+		// 措辞刻意避开 "timeout"/"timed out":core 的 isTimeoutFailure 按此判 504,
+		// 这里是网关空闲守卫主动断开,对外仍应是 502 upstream_error。
+		return transientOutcome("upstream produced no output before the gateway idle limit (disconnected by gateway): " + err.Error())
 	}
 	if err == nil {
-		return transientOutcome("上游请求失败")
+		return transientOutcome("upstream request failed")
 	}
 	return transientOutcome(err.Error())
 }
@@ -175,7 +177,7 @@ func upstreamTransportOutcome(ctx context.Context, err error) sdk.ForwardOutcome
 // blaming the selected upstream account. Any usage already reported upstream is
 // retained so Core can settle work that was completed before the disconnect.
 func streamAbortedOutcome(err error, usage *sdk.Usage, duration time.Duration) sdk.ForwardOutcome {
-	reason := "响应流已中断"
+	reason := "response stream was interrupted"
 	if err != nil {
 		reason = err.Error()
 	}

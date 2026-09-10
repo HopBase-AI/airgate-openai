@@ -22,7 +22,7 @@ func (g *OpenAIGateway) HandleWebSocket(ctx context.Context, conn sdk.WebSocketC
 	start := time.Now()
 	info := conn.ConnectInfo()
 	if info.Account == nil {
-		reason := "未提供账户信息"
+		reason := "account information not provided"
 		return transientOutcome(reason), fmt.Errorf("%s", reason)
 	}
 
@@ -35,7 +35,7 @@ func (g *OpenAIGateway) HandleWebSocket(ctx context.Context, conn sdk.WebSocketC
 	} else if account.Credentials["api_key"] != "" {
 		dialInfo, err = g.handleWSWithAPIKey(ctx, conn, account)
 	} else {
-		reason := "账号缺少 api_key 或 access_token"
+		reason := "account is missing api_key or access_token"
 		return accountDeadOutcome(reason), fmt.Errorf("%s", reason)
 	}
 
@@ -76,7 +76,7 @@ func (g *OpenAIGateway) handleWSWithOAuth(ctx context.Context, clientConn sdk.We
 		if wsResp != nil {
 			info = &wsDialResult{outcome: webSocketHandshakeFailureOutcome(wsResp, err)}
 		}
-		return info, fmt.Errorf("连接上游 WebSocket 失败: %w", err)
+		return info, fmt.Errorf("failed to connect to upstream WebSocket: %w", err)
 	}
 	defer func() {
 		_ = upstreamConn.Close()
@@ -99,7 +99,7 @@ func (g *OpenAIGateway) handleWSWithAPIKey(ctx context.Context, clientConn sdk.W
 		if wsResp != nil {
 			info = &wsDialResult{outcome: webSocketHandshakeFailureOutcome(wsResp, err)}
 		}
-		return info, fmt.Errorf("连接上游 WebSocket 失败: %w", err)
+		return info, fmt.Errorf("failed to connect to upstream WebSocket: %w", err)
 	}
 	defer func() {
 		_ = upstreamConn.Close()
@@ -119,7 +119,7 @@ func bridgeWebSocket(ctx context.Context, clientConn sdk.WebSocketConn, upstream
 		for {
 			msgType, data, err := clientConn.ReadMessage()
 			if err != nil {
-				errCh <- fmt.Errorf("读取客户端消息: %w", err)
+				errCh <- fmt.Errorf("failed to read client message: %w", err)
 				return
 			}
 			wsType := websocket.TextMessage
@@ -127,7 +127,7 @@ func bridgeWebSocket(ctx context.Context, clientConn sdk.WebSocketConn, upstream
 				wsType = websocket.BinaryMessage
 			}
 			if err := upstreamConn.WriteMessage(wsType, data); err != nil {
-				errCh <- fmt.Errorf("写入上游消息: %w", err)
+				errCh <- fmt.Errorf("failed to write upstream message: %w", err)
 				return
 			}
 		}
@@ -138,7 +138,7 @@ func bridgeWebSocket(ctx context.Context, clientConn sdk.WebSocketConn, upstream
 		for {
 			wsType, data, err := upstreamConn.ReadMessage()
 			if err != nil {
-				errCh <- fmt.Errorf("读取上游消息: %w", err)
+				errCh <- fmt.Errorf("failed to read upstream message: %w", err)
 				return
 			}
 			msgType := sdk.WSMessageText
@@ -146,7 +146,7 @@ func bridgeWebSocket(ctx context.Context, clientConn sdk.WebSocketConn, upstream
 				msgType = sdk.WSMessageBinary
 			}
 			if err := clientConn.WriteMessage(msgType, data); err != nil {
-				errCh <- fmt.Errorf("写入客户端消息: %w", err)
+				errCh <- fmt.Errorf("failed to write client message: %w", err)
 				return
 			}
 		}
