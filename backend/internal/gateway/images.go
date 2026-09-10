@@ -2036,7 +2036,7 @@ func (g *OpenAIGateway) pollAsyncImageTask(
 		case <-time.After(asyncImagePollInterval):
 		}
 	}
-	return nil, fmt.Errorf("async image task %s timed out", taskID)
+	return nil, fmt.Errorf("async image task %s did not finish in time", taskID)
 }
 
 // transformAsyncImageResult 将异步任务完成响应转换为 OpenAI Images API 标准格式。

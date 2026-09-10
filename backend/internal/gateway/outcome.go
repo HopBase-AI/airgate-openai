@@ -163,7 +163,9 @@ func upstreamTransportOutcome(ctx context.Context, err error) sdk.ForwardOutcome
 		if ctx != nil && ctx.Err() != nil {
 			return streamAbortedOutcome(fmt.Errorf("client disconnected before the upstream request completed: %w", err), nil, 0)
 		}
-		return transientOutcome("upstream first-byte or stream-stall timeout (disconnected by plugin guard): " + err.Error())
+		// 措辞刻意避开 "timeout"/"timed out":core 的 isTimeoutFailure 按此判 504,
+		// 这里是网关空闲守卫主动断开,对外仍应是 502 upstream_error。
+		return transientOutcome("upstream produced no output before the gateway idle limit (disconnected by gateway): " + err.Error())
 	}
 	if err == nil {
 		return transientOutcome("upstream request failed")

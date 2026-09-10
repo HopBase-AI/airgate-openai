@@ -46,7 +46,7 @@ func TestUpstreamTransportOutcomeGuardTimeout(t *testing.T) {
 	if got.Kind != sdk.OutcomeUpstreamTransient {
 		t.Fatalf("expected UpstreamTransient, got %v", got.Kind)
 	}
-	if !strings.Contains(got.Reason, "plugin guard") {
+	if !strings.Contains(got.Reason, "gateway idle limit") {
 		t.Fatalf("expected guard-timeout reason, got %q", got.Reason)
 	}
 }
