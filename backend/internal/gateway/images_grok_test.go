@@ -82,8 +82,8 @@ func TestFillUsagePerUnitImageCost(t *testing.T) {
 		wantInput   float64
 		wantTier    string
 	}{
-		{"2.0 两张 2k 两参考图", "grok-imagine-image-2.0", 2, "2k", 2, 0.16, 0.01, "2k"},
-		{"2.0 缺省档按 1k", "grok-imagine-image-2.0", 1, "", 0, 0.06, 0, "1k"},
+		{"2.0 两张 2k 两参考图", "grok-imagine-image-2.0", 2, "2k", 2, 0.12, 0.03, "2k"},
+		{"2.0 缺省档按 1k", "grok-imagine-image-2.0", 1, "", 0, 0.04, 0, "1k"},
 		{"基础版无 2k 档回落 1k", "grok-imagine-image", 1, "2k", 1, 0.02, 0.002, "1k"},
 		{"quality 1k 单参考图", "grok-imagine-image-quality", 1, "1k", 1, 0.05, 0.01, "1k"},
 	}
@@ -146,10 +146,10 @@ func TestHandleImagesResponseGrokPerUnit(t *testing.T) {
 			imageCost = detail.AccountCost
 		}
 	}
-	if !almostEqual(imageCost, 0.08, 1e-9) {
-		t.Fatalf("2k 单张费 = %v, want 0.08", imageCost)
+	if !almostEqual(imageCost, 0.06, 1e-9) {
+		t.Fatalf("2k 单张费 = %v, want 0.06", imageCost)
 	}
-	if got := outcome.Usage.Metadata[imageBillingBaseCostOverrideMetadataKey]; gjson.Parse(got).Float() != 0.08 {
+	if got := outcome.Usage.Metadata[imageBillingBaseCostOverrideMetadataKey]; gjson.Parse(got).Float() != 0.06 {
 		t.Fatalf("override 基数 = %q, want 0.08", got)
 	}
 }
