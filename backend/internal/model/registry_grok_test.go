@@ -57,7 +57,7 @@ func TestGrokImageSpecs(t *testing.T) {
 		oneK, twoK, input float64
 	}{
 		"grok-imagine-image":         {0.02, 0, 0.002},
-		"grok-imagine-image-2.0":     {0.06, 0.08, 0.01},
+		"grok-imagine-image-2.0":     {0.04, 0.06, 0.03},
 		"grok-imagine-image-quality": {0.05, 0.07, 0.01},
 	}
 	for id, want := range cases {
@@ -102,7 +102,7 @@ func TestGrokVariantFallback(t *testing.T) {
 	}
 	for _, id := range []string{"grok-imagine-image-3.0", "grok-imagine-image-pro"} {
 		spec := Lookup(id)
-		if !spec.ImagePerUnitBilling || spec.ImageUnit.OneK != 0.06 {
+		if !spec.ImagePerUnitBilling || spec.ImageUnit.OneK != 0.04 {
 			t.Fatalf("%s 应按 grok-imagine-image-2.0 兜底, got %+v", id, spec)
 		}
 	}

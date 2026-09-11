@@ -308,12 +308,43 @@ var registry = map[string]Spec{
 	"grok-4.6":                   grokChat("Grok 4.6", 500_000, 2.0, 0.50, 6.0),
 
 	// ── xAI Grok Imagine 图像（按张计费，$/张官方牌价，响应无 token usage）──
-	// 官方口径：image $0.02/张（输入图 $0.002）；2.0 按 resolution 1k $0.06 /
-	// 2k $0.08；quality 1k $0.05 / 2k $0.07（2.0 与 quality 输入图 $0.01）。
-	// 实测上游 cost_in_usd_ticks（官方 $×1e10）与上表逐档吻合；resolution
-	// 缺省按 1k 计（实测缺省单 6e8 ticks = 1k 档）。
+	//
+	// docs.x.ai/developers/pricing 每个型号**只公布一个价**，没有分辨率或画质分档：
+	// image $0.02/张、2.0 $0.04/张、quality $0.05/张。对照实测可知**公布的就是
+	// 缺省档的价**（缺省 = resolution 1k + quality auto）；2k 与 edits 的参考图
+	// 另计价，但官方页不列，只能实测。
+	//
+	// 2026-09-11 用生产探针读上游 cost_in_usd_ticks（官方 $×1e10）逐项重测：
+	//
+	//	型号        1k出图  2k出图  edits 参考图   官方页公布
+	//	image        0.02    无        0.002        $0.02  ✓
+	//	2.0          0.04    0.06      0.03         $0.04  ✓
+	//	quality      0.05    0.07      0.01         $0.05  ✓
+	//
+	// ⚠️ **2.0 整行此前是旧价**（1k 0.06 / 2k 0.08 / 参考图 0.01）——那是上一轮
+	// 核价时的真实值，xAI 后来把出图降了一档、把 edits 的参考图加价提到 0.03，
+	// 我们没跟。另两个型号每一项都仍与实测分毫不差，正是它们作对照才定位到是
+	// 单个型号被重定价，而不是我们的计价模型错了。
+	//
+	// 净效果：generations 降价（0.06→0.04），edits 单参考图总价不变
+	// （0.06+0.01 = 0.04+0.03 = $0.07）。
+	//
+	// ⚠️ 已知结构性偏差（本次未改，改了要动计费模型）：**xAI 的 edits 加价是
+	// 每次请求固定的，不随参考图张数变**——实测 2.0 传 1 张与传 2 张（不同图，
+	// 排除去重）都是 $0.070，quality 都是 $0.060。我方模型是
+	// ImageInputUnitPrice × 张数，所以只能对准其中一档。历史取值就是按
+	// **1 张**对准的（quality 0.05+0.01=0.06 恰等于实测），本次沿用该口径：
+	//
+	//	2.0     1 张：0.04+0.03 = 0.07 = 实测 ✓ ；2 张：0.10 vs 实测 0.07（多收 0.03）
+	//	quality 1 张：0.05+0.01 = 0.06 = 实测 ✓ ；2 张：0.07 vs 实测 0.06（多收 0.01）
+	//
+	// 生产上 1 张是主流（2.0 为 5:2），edits 上限本来就是 2 张。真要消掉这个偏差，
+	// 得把「按张」改成「每次请求一笔固定加价」，属计费模型改动，另行评估。
+	//
+	// 复核方法：发真实请求读响应里的 usage.cost_in_usd_ticks，**不要**读我方
+	// account_cost——那是拿本表算出来的，循环论证。
 	"grok-imagine-image":         grokImage("Grok Imagine Image", 0.02, 0, 0.002),
-	"grok-imagine-image-2.0":     grokImage("Grok Imagine Image 2.0", 0.06, 0.08, 0.01),
+	"grok-imagine-image-2.0":     grokImage("Grok Imagine Image 2.0", 0.04, 0.06, 0.03),
 	"grok-imagine-image-quality": grokImage("Grok Imagine Image Quality", 0.05, 0.07, 0.01),
 
 	// ── DeepSeek（OpenAI 兼容协议，经 TokenHub 转发）──
