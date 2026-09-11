@@ -198,6 +198,7 @@ type imagesRequest struct {
 	N             int
 	Size          string
 	Resolution    string // xAI Grok Imagine 分辨率档（1k/2k），按张计费模型的计费维度
+	AspectRatio   string // xAI Grok Imagine 画面比例（16 值官方枚举），不影响计费只定形状
 	Quality       string
 	Background    string
 	OutputFormat  string
@@ -630,6 +631,15 @@ func buildPerUnitImagesEditJSONBody(body []byte, contentType string, imgReq *ima
 	if imgReq.Resolution != "" {
 		payload["resolution"] = imgReq.Resolution
 	}
+	// aspect_ratio / quality 也必须带上：JSON 路径是整体透传天然保留，multipart 路径
+	// 却是从解析结果「重建」body——漏写就等于静默丢参数，客户端看不出区别，
+	// 出图比例不对、quality 不生效都查不到原因（「参数看起来生效了其实没生效」是已登记的事故模式）。
+	if imgReq.AspectRatio != "" {
+		payload["aspect_ratio"] = imgReq.AspectRatio
+	}
+	if imgReq.Quality != "" {
+		payload["quality"] = imgReq.Quality
+	}
 	out, err := json.Marshal(payload)
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to build edits request body: %w", err)
@@ -677,6 +687,8 @@ func parseImagesEditMultipart(body []byte, contentType string) (*imagesRequest, 
 			req.Size = text
 		case "resolution":
 			req.Resolution = text
+		case "aspect_ratio":
+			req.AspectRatio = text
 		case "quality":
 			req.Quality = text
 		case "background":

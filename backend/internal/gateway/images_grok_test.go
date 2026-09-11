@@ -1,7 +1,10 @@
 package gateway
 
 import (
+	"bytes"
+	"mime/multipart"
 	"net/http"
+	"net/textproto"
 	"strings"
 	"testing"
 	"time"
@@ -235,6 +238,81 @@ func TestBuildPerUnitImagesEditJSONBody(t *testing.T) {
 			t.Fatalf("image.url = %q", got)
 		}
 	})
+	// multipart 走的是「从解析结果重建 body」，不像 JSON 那样整体透传，
+	// 所以每个可透传参数都要显式写回；漏一个就是静默丢参数。
+	t.Run("multipart 重建含 aspect_ratio 与 quality", func(t *testing.T) {
+		imgReq := &imagesRequest{
+			Model: "grok-imagine-image-2.0", Prompt: "p",
+			Images: []string{"data:image/png;base64,x"},
+			Resolution: "2k", AspectRatio: "9:16", Quality: "medium", N: 1,
+		}
+		out, _, err := buildPerUnitImagesEditJSONBody([]byte("binary"), "multipart/form-data; boundary=x", imgReq)
+		if err != nil {
+			t.Fatalf("err = %v", err)
+		}
+		if got := gjson.GetBytes(out, "aspect_ratio").String(); got != "9:16" {
+			t.Fatalf("aspect_ratio 被静默丢弃: %q", got)
+		}
+		if got := gjson.GetBytes(out, "quality").String(); got != "medium" {
+			t.Fatalf("quality 被静默丢弃: %q", got)
+		}
+	})
+	// 未传的参数不能凭空出现，否则会把上游的缺省行为改掉。
+	t.Run("multipart 未传的参数不写入", func(t *testing.T) {
+		imgReq := &imagesRequest{Model: "grok-imagine-image", Prompt: "p", Images: []string{"data:image/png;base64,x"}, N: 1}
+		out, _, err := buildPerUnitImagesEditJSONBody([]byte("binary"), "multipart/form-data; boundary=x", imgReq)
+		if err != nil {
+			t.Fatalf("err = %v", err)
+		}
+		for _, key := range []string{"aspect_ratio", "quality", "resolution"} {
+			if gjson.GetBytes(out, key).Exists() {
+				t.Fatalf("未传的 %s 不应出现在重建 body 里: %s", key, string(out))
+			}
+		}
+	})
+}
+
+// TestParseImagesEditMultipartAspectRatio multipart 表单里的 aspect_ratio 必须被解析出来，
+// 否则它在到达重建那一步之前就已经没了。
+func TestParseImagesEditMultipartAspectRatio(t *testing.T) {
+	var buf bytes.Buffer
+	w := multipart.NewWriter(&buf)
+	for _, kv := range [][2]string{
+		{"model", "grok-imagine-image-2.0"},
+		{"prompt", "p"},
+		{"aspect_ratio", "21:9"},
+		{"quality", "low"},
+		{"resolution", "2k"},
+	} {
+		if err := w.WriteField(kv[0], kv[1]); err != nil {
+			t.Fatalf("write field %s: %v", kv[0], err)
+		}
+	}
+	// 必须显式声明 image/* —— CreateFormFile 默认 application/octet-stream，
+	// 解析侧据此拼 data URL，认不出就直接拒收。
+	header := make(textproto.MIMEHeader)
+	header.Set("Content-Disposition", `form-data; name="image"; filename="a.png"`)
+	header.Set("Content-Type", "image/png")
+	part, err := w.CreatePart(header)
+	if err != nil {
+		t.Fatalf("create file part: %v", err)
+	}
+	if _, err := part.Write([]byte{0x89, 'P', 'N', 'G'}); err != nil {
+		t.Fatalf("write file part: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("close writer: %v", err)
+	}
+	req, err := parseImagesEditMultipart(buf.Bytes(), w.FormDataContentType())
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if req.AspectRatio != "21:9" {
+		t.Fatalf("AspectRatio = %q, want 21:9", req.AspectRatio)
+	}
+	if req.Quality != "low" || req.Resolution != "2k" {
+		t.Fatalf("Quality/Resolution = %q/%q", req.Quality, req.Resolution)
+	}
 }
 
 // TestParseImagesJSONXAIImageForms /edits 的 image 字段兼容 xAI 结构写法。
