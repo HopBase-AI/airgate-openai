@@ -58,6 +58,54 @@
   `asyncImageTaskFailedError` 按同步失败分类，不能判 transient（transient 会触发
   failover 重新提交）。
 
+## 长上下文阶梯（计价）
+
+旗舰模型对超长 prompt 换档计价。本仓是这套规则的**权威实现**，改动前先读这段。
+
+- **语义**：`withLongCtx(s)` 给 Spec 附上 OpenAI 旗舰系阶梯——阈值 `272_000`、
+  input ×2、cached ×2、output ×1.5。`grokChat` 给 xAI 系附另一组——阈值 `200_000`、
+  三轴全 ×2。其余模型四个 `LongContext*` 字段保持零值 = **无阶梯**，
+  `applyLongContextPricing` 直接返回短档价。
+- **阈值口径**：比的是 `input_tokens + cached_input_tokens`（未缓存输入 + 缓存命中输入），
+  **不含输出、不含 reasoning**；且 `<= threshold` 走短档，必须**严格大于**才进长档——
+  与 OpenAI 原文 "Prompts with **more than** 272K input tokens" 逐字对应。
+  ⚠️ xAI 官方措辞是 "**≥** 200k prompt tokens"，恰好 200,000 token 的请求我方按短档收，
+  这是已登记的 code-vs-vendor 偏差（见根仓 `deploy/current-model-pricing.md`）。
+- **整笔换档**：进了长档，该次请求全部 token（含阈值以下那部分）按长档单价结算，不分段。
+  官方 "for the full request" / "for the full session"。
+- **与服务档位相乘**：`pricesForServiceTier` 先取档位基准（standard / `priority` = ×2 /
+  `flex` = ×0.5），`applyLongContextPricing` 再乘阶梯倍率，两者是相乘关系。
+  官方现在把 ×2 那档叫 **Fast**，我方键名仍是 `priority`；`normalizeOpenAIServiceTier`
+  只认 `priority` / `flex`，客户端传 `service_tier=fast` 会被剥掉并按标准档计
+  （不上送上游，所以与上游实收自洽，但别名不通）。
+- **覆盖层**：后台模型目录条目可用 `long_context`
+  （`threshold` / `input_multiplier` / `cached_multiplier` / `output_multiplier`）显式声明。
+  只写 `pricing` 的条目**不会**抹掉内置阶梯（`applyOverlay` 逐字段覆盖）；
+  但 `inferNewModelBase` 对没匹配到任何内置 GPT 系列的新模型会主动清零阶梯——
+  不能让 GLM 之类第三方模型从 `DefaultSpec` 继承 GPT 的 272K 倍率。
+
+### 🚫 纪律：新旗舰上架必须核对官方阶梯
+
+**上架任何旗舰型号时，把官方长上下文阶梯当成价格的一部分一起核，核不到就写清楚"官方无阶梯"，
+不能默认留空。** 官方阶梯规则常常**不在定价表里**，而是写在模型页正文或定价页脚注
+（`gpt-5.5` 的 272K 阶梯就只在模型页正文，至今没跟上）——只抄定价表必然漏。
+
+2026-09 的教训（PR #66）：`gpt-6-astra` 2026-09-03 上架时官方定价页还没有 GPT-6 行，
+registry 按"不虚构倍率"刻意把阶梯留空，**之后官方出行了却没人回头补**。
+生产 12 天（09-05 ~ 09-16）16,160 笔里有 **1,162 笔超过 272K 输入**（7 个用户，
+平均 prompt 53 万 token、最大 1,101,045），全部按基准价结算，
+**少收 ¥518.67**（已收 ¥526.62，应收 ¥1,045.29）。
+留空本身是对的——错在没给"官方出行后回来补"留下任何钩子。
+
+所以上新旗舰时三件事一起做：
+
+1. 逐项核官方（基准价 / 缓存价 / 阶梯阈值与三轴倍率 / 上下文窗口 / 最大输出 /
+   Batch·Flex·Fast 倍率），出处与核对日期写进 registry 注释；
+2. 官方当时确实没公布的，注释里写明"待官方出行后补"，并在根仓
+   `deploy/current-model-pricing.md` 登记一行——那份文档是对内报价与核价的基线，
+   **生产在跑的模型当天就必须有行**；
+3. 阶梯边界补测：阈值 −1 / 恰好等于 / +1 三例，且缓存 token 计入阈值。
+
 ## 混合现状（过渡态）
 
 本仓当前混合了网关 + provider + UI 三层职责（目标应拆为独立组件）：
