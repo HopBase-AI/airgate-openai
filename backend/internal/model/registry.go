@@ -21,8 +21,8 @@ import (
 //   - 标准档：Input / Cached / Output
 //   - Priority 档：*Priority 字段（通常标准 × 2；gpt-5.5 为 × 2.5），缺省时 SDK 以 × 2 兜底
 //   - Flex / Batch 档：*Flex 字段（= 标准 × 0.5），缺省时 SDK 以 × 0.5 兜底
-//   - 长上下文档（仅 gpt-5.6 家族）：完整 input_tokens 超过 LongContextThreshold
-//     时，整次请求全量按倍率计费
+//   - 长上下文档（gpt-6 Astra 与 gpt-5.6 家族）：完整 input_tokens 超过
+//     LongContextThreshold 时，整次请求全量按倍率计费
 type Spec struct {
 	Name            string
 	ContextWindow   int
@@ -58,7 +58,8 @@ type Spec struct {
 	CachedPriceFlex float64
 	OutputPriceFlex float64
 
-	// 长上下文阶梯（只对 gpt-5.6 家族填非零值）。
+	// 长上下文阶梯（gpt-6 Astra / gpt-5.6 家族经 withLongCtx 填，Grok 经 grokChat 填；
+	// 其余模型保持零值 = 无阶梯）。
 	LongContextThreshold        int
 	LongContextInputMultiplier  float64
 	LongContextOutputMultiplier float64
@@ -191,8 +192,14 @@ func imgSpec(name string) Spec {
 	return pricedImageSpec(name, 5.0, 0.5, 30.0)
 }
 
-// withLongCtx 在已构造的 Spec 基础上附加 GPT-5.6 长上下文阶梯。
-// OpenAI 官方：input ×2、cached ×2、output ×1.5，阈值 272k input_tokens。
+// withLongCtx 在已构造的 Spec 基础上附加 OpenAI 旗舰系长上下文阶梯。
+//
+// 官方原文（developers.openai.com/api/docs/models/gpt-6-astra，2026-09-16 核）：
+// "Prompts with more than 272K input tokens are priced at 2x input and cache rates
+// and 1.5x output for the full request."（gpt-5.6 三档措辞同义，定价页把两栏标成
+// Short context "≤272K input tokens" / Long context ">272K input tokens"）。
+// 即：阈值 272k input_tokens、**超过**才进阶梯，input ×2、cached ×2、output ×1.5，
+// 且按「整次请求全量」计价——与 applyLongContextPricing 的实现逐字对应。
 func withLongCtx(s Spec) Spec {
 	s.LongContextThreshold = 272_000
 	s.LongContextInputMultiplier = 2.0
@@ -256,17 +263,26 @@ func deepSeekFlash(name string) Spec {
 // 若将来需要插件声明此映射，可在 toModelInfo 中为对应模型设置
 // Metadata["scheduling_model"]，Core 会优先读取该元数据。
 var registry = map[string]Spec{
-	// ── GPT-6 Astra(2026-09-03 发布,分阶段放量:Daybreak 客户先行,ChatGPT 各档与 API/AWS「数日内」)──
-	// 型号 ID 与价格来源:发布日新闻稿转述(VentureBeat 2026-09-03):标准档 $10/$50、
-	// Fast 档 $20/$100(=标准×2,与 std() 惯例一致)、「缓存读写单独计价」。
-	// ⚠️ 截至 2026-09-04 官方 developers.openai.com 定价页仍无 gpt-6 行:
-	//   缓存读按 OpenAI 惯例取输入×10%;上下文窗口/最大输出官方未公布,先沿用 5.6 家族的
-	//   1.05M/128K;长上下文阶梯官方未公布,**不**启用(宁可不收阶梯也不虚构倍率)。
-	//   官方牌价页出行后必须回来逐项核对——gpt-5.6 错价事故的教训:官方价只认官方原文。
-	"gpt-6-astra": std("GPT-6 Astra", 1050000, 128000, 10.0, 1.0, 50.0),
+	// ── GPT-6 Astra(2026-09-03 发布;2026-09-16 官方牌价页/模型页已出行,逐项核对完毕)──
+	// 出处:developers.openai.com/api/docs/pricing 与 .../models/gpt-6-astra。
+	// 标准档 $10 / 缓存读 $1 / 输出 $50、Batch 与 Flex = 标准 ×50%、Fast = 标准 ×2、
+	// 1,050,000 上下文 / 128,000 最大输出——发布日按新闻稿+惯例内置的这几项官方原文
+	// 全部吻合,保持不动。
+	// 长上下文阶梯官方原文:"Prompts with more than 272K input tokens are priced at
+	// 2x input and cache rates and 1.5x output for the full request."——与 5.6 家族
+	// 同一口径,故复用 withLongCtx。**2026-09-16 补**:此前按「官方未公布不虚构倍率」
+	// 刻意留空,官方出行后 >272K 的请求一直按基准价少收,生产 12 天 1162 笔踩中。
+	// ⚠️ 仍未实现:官方另列 cache writes $12.50/1M(=未缓存输入 ×1.25)。上游 usage 只给
+	//   prompt_tokens_details.cached_tokens,不区分缓存写入 token,拿不到量就不能计——
+	//   哪天上游给出这个字段,这里和 tokenPrices 要一起加。
+	"gpt-6-astra": withLongCtx(std("GPT-6 Astra", 1050000, 128000, 10.0, 1.0, 50.0)),
 
 	// ── GPT-5.6 家族(2026-07-09 GA):三档同为 1.05M 上下文,>272K 输入整笔 ×2 in / ×1.5 out ──
 	// 官方价 2026-07-11 核实:Sol $5/$30、Terra $2.5/$15、Luna $1/$6,缓存读=输入×10%。
+	// ⚠️ 2026-09-16 复核:官方已下调三档标准价(Sol $4/$0.4/$20——官方注明是至少持续到
+	//   2026-11-21 的**促销价**、Terra $2/$0.2/$12、Luna $0.2/$0.02/$1.2),本表仍是旧价,
+	//   即基准价高于现行官方价。跟不跟这轮降价是定价决策(还牵扯促销到期回涨),
+	//   不在本次「补 Astra 阶梯」的范围内,另行拍板;阶梯口径(272K / ×2 / ×1.5)未变。
 	"gpt-5.6-sol":   withLongCtx(std("GPT 5.6 Sol", 1050000, 128000, 5.0, 0.5, 30.0)),
 	"gpt-5.6-terra": withLongCtx(std("GPT 5.6 Terra", 1050000, 128000, 2.5, 0.25, 15.0)),
 	"gpt-5.6-luna":  withLongCtx(std("GPT 5.6 Luna", 1050000, 128000, 1.0, 0.1, 6.0)),

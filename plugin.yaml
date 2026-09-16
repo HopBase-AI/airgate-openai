@@ -392,6 +392,10 @@ gateway:
       input_price_flex: 5
       output_price_flex: 25
       cached_input_price_flex: 0.5
+      long_context_threshold: 272000
+      long_context_input_multiplier: 2
+      long_context_output_multiplier: 1.5
+      long_context_cached_multiplier: 2
     - id: gpt-image-1
       name: GPT Image 1
       context_window: 32000
