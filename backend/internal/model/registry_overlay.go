@@ -2,6 +2,8 @@ package model
 
 import (
 	"encoding/json"
+	"log/slog"
+	"math"
 	"strings"
 	"sync/atomic"
 )
@@ -81,6 +83,20 @@ type overlayLongContext struct {
 	OutputMultiplier float64 `json:"output_multiplier"`
 }
 
+// overlayListPrice 覆盖层条目的厂商官方牌价（原币）。
+//
+//	"list_price":{"currency":"CNY","fx":6.8,"input":12,"cached_input":2.4,"output":36}
+//
+// 恒等式 <k> ÷ fx ≈ pricing.<k>（USD 基准价）。core 写入侧会按此拒写；插件侧
+// 只兜底：不一致记 WARN 仍加载（牌价纯展示，不参与计费，不值得为它拒掉整条价格）。
+type overlayListPrice struct {
+	Currency    string  `json:"currency"`
+	FX          float64 `json:"fx"`
+	Input       float64 `json:"input"`
+	CachedInput float64 `json:"cached_input"`
+	Output      float64 `json:"output"`
+}
+
 type overlayEntry struct {
 	ID            string              `json:"id"`
 	Name          string              `json:"name,omitempty"`
@@ -90,6 +106,10 @@ type overlayEntry struct {
 	ImageOnly     *bool               `json:"image_only,omitempty"`
 	Pricing       *overlayPricing     `json:"pricing,omitempty"`
 	LongContext   *overlayLongContext `json:"long_context,omitempty"`
+	ListPrice     *overlayListPrice   `json:"list_price,omitempty"`
+	// Vendor 厂商标识（metadata 约定键 "vendor"）；零插件模型（qwen / kimi 等）
+	// 关键字推断不到，靠这里补正。空 = 沿用推断。
+	Vendor string `json:"vendor,omitempty"`
 }
 
 func parseCatalogOverlay(raw string) (*catalogOverlay, error) {
@@ -114,7 +134,7 @@ func parseCatalogOverlay(raw string) (*catalogOverlay, error) {
 		if !ok {
 			base = inferNewModelBase(id, e, eff)
 		}
-		eff[id] = applyOverlay(base, e)
+		eff[id] = applyOverlay(id, base, e)
 		if e.Enabled != nil && !*e.Enabled {
 			hidden[id] = true
 		} else {
@@ -173,9 +193,12 @@ func cloneRegistry(src map[string]Spec) map[string]Spec {
 	return out
 }
 
-func applyOverlay(base Spec, e overlayEntry) Spec {
+func applyOverlay(id string, base Spec, e overlayEntry) Spec {
 	if e.Name != "" {
 		base.Name = e.Name
+	}
+	if vendor := strings.TrimSpace(e.Vendor); vendor != "" {
+		base.Vendor = vendor
 	}
 	if e.ContextWindow > 0 {
 		base.ContextWindow = e.ContextWindow
@@ -192,7 +215,54 @@ func applyOverlay(base Spec, e overlayEntry) Spec {
 	if e.LongContext != nil {
 		applyLongContextOverlay(&base, *e.LongContext)
 	}
+	if e.ListPrice != nil {
+		applyListPriceOverlay(&base, id, *e.ListPrice)
+	}
 	return base
+}
+
+// listPriceTolerance 牌价恒等式的相对容差。覆盖层 USD 基准价通常只写 4 位小数
+// （12 ÷ 6.8 = 1.76470588… 录成 1.7647），绝对 1e-6 会把合法录入全判成不一致。
+const listPriceTolerance = 1e-3
+
+// applyListPriceOverlay 把覆盖层牌价映射进 Spec.ListPrice，并按恒等式
+// list.<k> ÷ fx ≈ 基准价 校验：不一致只告警仍加载（core 写入侧才是拒写闸门）。
+// 币种或折算率缺失则整体丢弃——没有折算率的原币数字无法验算，写出去只会误导。
+func applyListPriceOverlay(spec *Spec, id string, p overlayListPrice) {
+	currency := strings.ToUpper(strings.TrimSpace(p.Currency))
+	if currency == "" || p.FX <= 0 {
+		slog.Warn("model_list_price_invalid",
+			"model", id, "currency", p.Currency, "fx", p.FX,
+			"reason", "currency and fx are required")
+		return
+	}
+	lp := ListPrice{
+		Currency:    currency,
+		FX:          p.FX,
+		Input:       math.Max(p.Input, 0),
+		CachedInput: math.Max(p.CachedInput, 0),
+		Output:      math.Max(p.Output, 0),
+	}
+	for _, check := range []struct {
+		field string
+		list  float64
+		base  float64
+	}{
+		{"input", lp.Input, spec.InputPrice},
+		{"cached_input", lp.CachedInput, spec.CachedPrice},
+		{"output", lp.Output, spec.OutputPrice},
+	} {
+		if check.list <= 0 || check.base <= 0 {
+			continue
+		}
+		implied := check.list / lp.FX
+		if math.Abs(implied-check.base) > check.base*listPriceTolerance {
+			slog.Warn("model_list_price_mismatch",
+				"model", id, "field", check.field, "currency", currency,
+				"list", check.list, "fx", lp.FX, "implied_usd", implied, "base_usd", check.base)
+		}
+	}
+	spec.ListPrice = lp
 }
 
 func applyPricingOverlay(spec *Spec, p overlayPricing) {
