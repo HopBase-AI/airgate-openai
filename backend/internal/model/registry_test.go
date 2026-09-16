@@ -350,9 +350,10 @@ func TestCatalogOverlay_NewModelWithoutStandardKeepsInferred(t *testing.T) {
 	}
 }
 
-// TestBuiltinGPT6Astra 锁定 GPT-6 Astra 的内置价(2026-09-03 发布日新闻稿口径:$10/$50,
-// Fast ×2;官方牌价页出行后须回核)与关键字兜底:任何未注册的 gpt-6* 变体都按 Astra 价计,
-// 不得掉进 gpt-5.4 兜底少收 4 倍。
+// TestBuiltinGPT6Astra 锁定 GPT-6 Astra 的内置价与长上下文阶梯(2026-09-16 按官方
+// developers.openai.com 牌价页/模型页逐项核实:$10/$1/$50、Fast ×2、Batch|Flex ×0.5、
+// 1.05M 上下文 / 128K 最大输出、>272K input tokens 整笔 ×2 in|cached / ×1.5 out),
+// 以及关键字兜底:任何未注册的 gpt-6* 变体都按 Astra 价计,不得掉进 gpt-5.4 兜底少收 4 倍。
 func TestBuiltinGPT6Astra(t *testing.T) {
 	ResetCatalogOverlay()
 	spec, ok := registry["gpt-6-astra"]
@@ -370,8 +371,16 @@ func TestBuiltinGPT6Astra(t *testing.T) {
 		t.Fatalf("gpt-6-astra Batch/Flex 档应为标准×0.5, got %v/%v/%v",
 			spec.InputPriceFlex, spec.CachedPriceFlex, spec.OutputPriceFlex)
 	}
-	if spec.LongContextThreshold != 0 || spec.LongContextInputMultiplier != 0 {
-		t.Fatalf("gpt-6-astra 官方未公布长上下文阶梯,不得启用: %+v", spec)
+	// 官方原文:"Prompts with more than 272K input tokens are priced at 2x input and
+	// cache rates and 1.5x output for the full request."
+	if spec.LongContextThreshold != 272_000 {
+		t.Fatalf("gpt-6-astra 长上下文阈值 = %d, want 272000", spec.LongContextThreshold)
+	}
+	if spec.LongContextInputMultiplier != 2 || spec.LongContextCachedMultiplier != 2 ||
+		spec.LongContextOutputMultiplier != 1.5 {
+		t.Fatalf("gpt-6-astra 阶梯倍率 = %v/%v/%v, want 2/2/1.5",
+			spec.LongContextInputMultiplier, spec.LongContextCachedMultiplier,
+			spec.LongContextOutputMultiplier)
 	}
 	if spec.ContextWindow != 1050000 || spec.MaxOutputTokens != 128000 {
 		t.Fatalf("gpt-6-astra 上下文规格错误: %d/%d", spec.ContextWindow, spec.MaxOutputTokens)
@@ -387,6 +396,32 @@ func TestBuiltinGPT6Astra(t *testing.T) {
 	}
 	if got := Lookup("gpt-5.6-sol"); got.InputPrice == 10 {
 		t.Fatal("gpt-6 兜底不得波及 gpt-5.6")
+	}
+}
+
+// TestBuiltinGPT6Astra_OverlayKeepsLongContextTier 生产后台「模型目录」里有一条
+// gpt-6-astra 覆盖条目(只写了 pricing/context_window,没有 long_context)。内置模型
+// 走 applyOverlay 分支,只有条目显式给出 long_context 才动阶梯字段——这条用例把
+// 「上线后阶梯被覆盖层静默抹掉」钉死,免得又变成只有一行告警日志的少收。
+func TestBuiltinGPT6Astra_OverlayKeepsLongContextTier(t *testing.T) {
+	ResetCatalogOverlay()
+	t.Cleanup(ResetCatalogOverlay)
+
+	// 与生产 settings.models.catalog.openai 里那条同形。
+	if _, err := SetCatalogOverlayJSON(`[
+	  {"id":"gpt-6-astra","name":"GPT-6 Astra","enabled":true,
+	   "pricing":{"input":10,"cached_input":1,"output":50,
+	     "priority_input":20,"priority_cached_input":2,"priority_output":100,
+	     "flex_input":5,"flex_cached_input":0.5,"flex_output":25},
+	   "context_window":1050000,"max_output_tokens":128000}
+	]`); err != nil {
+		t.Fatalf("SetCatalogOverlayJSON: %v", err)
+	}
+
+	spec := Lookup("gpt-6-astra")
+	if spec.LongContextThreshold != 272_000 || spec.LongContextInputMultiplier != 2 ||
+		spec.LongContextCachedMultiplier != 2 || spec.LongContextOutputMultiplier != 1.5 {
+		t.Fatalf("覆盖层不得抹掉内置长上下文阶梯: %+v", spec)
 	}
 }
 
