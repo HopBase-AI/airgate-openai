@@ -95,12 +95,23 @@ func (g *OpenAIGateway) createHostTask(ctx context.Context, taskType string, use
 
 type updateTaskOptions struct {
 	Execution map[string]any
+	// ErrorCode / ErrorType 失败终态的分类：工作坊与控制台按 error_code 渲染当前语言的
+	// 提示，error_message 只作英文兜底（见 TaskRuntime.Fail）。
+	ErrorCode string
+	ErrorType string
 }
 
 type UpdateTaskOption func(*updateTaskOptions)
 
 func WithExecution(exec map[string]any) UpdateTaskOption {
 	return func(o *updateTaskOptions) { o.Execution = exec }
+}
+
+func WithTaskError(code, errType string) UpdateTaskOption {
+	return func(o *updateTaskOptions) {
+		o.ErrorCode = strings.TrimSpace(code)
+		o.ErrorType = strings.TrimSpace(errType)
+	}
 }
 
 func (g *OpenAIGateway) updateHostTask(ctx context.Context, taskID int64, status sdk.TaskStatus, progress int, output map[string]interface{}, errorMessage string, opts ...UpdateTaskOption) error {
@@ -125,6 +136,12 @@ func (g *OpenAIGateway) updateHostTask(ctx context.Context, taskID int64, status
 	}
 	if o.Execution != nil {
 		payload["execution"] = o.Execution
+	}
+	if o.ErrorCode != "" {
+		payload["error_code"] = o.ErrorCode
+	}
+	if o.ErrorType != "" {
+		payload["error_type"] = o.ErrorType
 	}
 	_, err := g.hostInvoke(ctx, hostMethodTasksUpdate, payload)
 	return err

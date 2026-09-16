@@ -144,6 +144,7 @@ func executeImageTask(ctx context.Context, g *OpenAIGateway, task sdk.HostTask, 
 		rt.logger.Info("task_redispatch_no_upstream_id", "task_id", task.ID)
 		return rt.Fail(ctx, &TaskError{
 			Type:    "upstream_error",
+			Code:    "task_interrupted",
 			Message: "task was interrupted by a service restart, please submit it again",
 		})
 	}
@@ -155,6 +156,7 @@ func executeImageTask(ctx context.Context, g *OpenAIGateway, task sdk.HostTask, 
 	if err := g.resolveTaskInputAssets(ctx, task.Input); err != nil {
 		return rt.Fail(ctx, &TaskError{
 			Type:    "invalid_request",
+			Code:    "reference_image_invalid",
 			Message: "failed to resolve input assets: " + err.Error(),
 		})
 	}
@@ -162,6 +164,7 @@ func executeImageTask(ctx context.Context, g *OpenAIGateway, task sdk.HostTask, 
 	if err := shrinkTaskInputImages(task.Input); err != nil {
 		return rt.Fail(ctx, &TaskError{
 			Type:    "invalid_request",
+			Code:    "reference_image_invalid",
 			Message: "failed to compress input image: " + err.Error(),
 		})
 	}
@@ -170,6 +173,7 @@ func executeImageTask(ctx context.Context, g *OpenAIGateway, task sdk.HostTask, 
 	if err != nil {
 		return rt.Fail(ctx, &TaskError{
 			Type:    "invalid_request",
+			Code:    "invalid_request",
 			Message: "failed to build request body: " + err.Error(),
 		})
 	}
@@ -198,6 +202,7 @@ func executeImageTask(ctx context.Context, g *OpenAIGateway, task sdk.HostTask, 
 		// 处理。所以这里没必要再对 err.Error() 做 safety 关键词匹配。
 		return rt.Fail(ctx, &TaskError{
 			Type:      "upstream_error",
+			Code:      "upstream_forward_failed",
 			Message:   "upstream forward failed: " + err.Error(),
 			Retryable: !isRedispatch,
 		})
@@ -217,6 +222,7 @@ func executeImageTask(ctx context.Context, g *OpenAIGateway, task sdk.HostTask, 
 		rt.logger.Warn("store_image_assets_failed", "error", err, "body_len", len(resp.Body))
 		return rt.Fail(ctx, &TaskError{
 			Type:    "upstream_error",
+			Code:    "upstream_no_image",
 			Message: "upstream response contains no usable image: " + err.Error(),
 		})
 	}
@@ -224,6 +230,7 @@ func executeImageTask(ctx context.Context, g *OpenAIGateway, task sdk.HostTask, 
 		rt.logger.Warn("store_image_assets_empty", "body_len", len(resp.Body))
 		return rt.Fail(ctx, &TaskError{
 			Type:    "upstream_error",
+			Code:    "image_store_failed",
 			Message: "image storage failed, none of the images could be saved",
 		})
 	}
