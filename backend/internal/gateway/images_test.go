@@ -1064,6 +1064,42 @@ func TestClassifyUpstreamTaskErrorSafetyRejected(t *testing.T) {
 	}
 }
 
+// MiniMax canvas-20 异步任务的失败体没有 error 信封，原因在 base_resp.status_msg。
+// 2026-09-16 生产实录：成员提示词被内容安全拒绝，任务却只写了「upstream HTTP 400」。
+func TestClassifyUpstreamTaskErrorMiniMaxBaseResp(t *testing.T) {
+	body := []byte(`{"created":0,"trace_id":"06f9","base_resp":{"status_code":400,"status_msg":"Your request was rejected by the content safety system. The generated image may not comply with the content policy — please modify your prompt and try again. (request id: 06f9)"}}`)
+	taskErr := classifyUpstreamTaskError(http.StatusBadRequest, body)
+	if taskErr.Code != "safety_rejected" {
+		t.Fatalf("Code = %q, want safety_rejected", taskErr.Code)
+	}
+	if !strings.Contains(taskErr.Message, "content safety system") {
+		t.Fatalf("Message = %q, want the upstream status_msg", taskErr.Message)
+	}
+	if taskErr.Retryable {
+		t.Fatalf("Retryable = true, want false")
+	}
+
+	// 非安全类的 base_resp 失败：文案照样透出，错误码取 status_code。
+	body = []byte(`{"base_resp":{"status_code":2049,"status_msg":"invalid api key"}}`)
+	taskErr = classifyUpstreamTaskError(http.StatusBadRequest, body)
+	if taskErr.Message != "invalid api key" {
+		t.Fatalf("Message = %q, want invalid api key", taskErr.Message)
+	}
+
+	// 中转常见的顶层 message 形态。
+	body = []byte(`{"message":"model canvas-20 is not enabled for this key"}`)
+	taskErr = classifyUpstreamTaskError(http.StatusBadRequest, body)
+	if taskErr.Message != "model canvas-20 is not enabled for this key" {
+		t.Fatalf("Message = %q, want the top-level message", taskErr.Message)
+	}
+
+	// 什么都没有时仍退回通用文案。
+	taskErr = classifyUpstreamTaskError(http.StatusBadRequest, []byte(`{"created":0}`))
+	if taskErr.Message != "upstream HTTP 400" {
+		t.Fatalf("Message = %q, want upstream HTTP 400", taskErr.Message)
+	}
+}
+
 func TestImageTaskQualityEcho(t *testing.T) {
 	input, attrs, err := imageGenerateHandler{}.BuildInput(&sdk.ForwardRequest{
 		Body:    []byte(`{"model":"gpt-image-2","prompt":"a shiba","size":"1024x1024","quality":"high"}`),
