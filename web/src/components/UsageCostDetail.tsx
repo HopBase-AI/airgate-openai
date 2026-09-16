@@ -1,3 +1,4 @@
+import { isValidElement } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
 import type { UsageRecordSurfaceProps } from '@doudou-start/airgate-theme/plugin';
 
@@ -110,6 +111,23 @@ function contextArray<T>(context: UsageRecordSurfaceProps['context'], camel: str
 function recordFromContext(context: UsageRecordSurfaceProps['context']): UsageRecordLike {
   const record = context?.record;
   return record && typeof record === 'object' ? record : {};
+}
+
+/**
+ * 厂商官方牌价验算块（docs/pricing-list-verification-sop.md §4.1）。
+ *
+ * 国内厂商模型（覆盖层登记的千问 / Kimi 等）的官网标价是 ¥，插件按固定折算率折成
+ * 美元基准价计费，客户拿到的 `$1.76 × 折` 对不上官网的 `¥12 × 折`。验算块把
+ * 「官方牌价 → 官方费用 → 折扣 → 折算率 → 实扣」原样铺开，让客户逐笔对得上。
+ *
+ * **由 core 渲染好后经 context 透传，插件只负责摆位置**：本渲染器至今是硬编码中文
+ * （插件前端没有 i18n 运行时），验算块若在这里自己拼，五语欠账立刻铺开
+ * （docs/i18n-sop.md）。core 那份文案是五语的，且与通用 tooltip、CSV 导出同一口径，
+ * 三处不会漂。core 版本较老没下发时返回 null，本面板其余部分照常。
+ */
+function verificationBlock(context: UsageRecordSurfaceProps['context']): ReactNode {
+  const node = context?.officialNativeBlock ?? context?.official_native_block;
+  return isValidElement(node) ? node : null;
 }
 
 function money(value: unknown) {
@@ -383,6 +401,7 @@ export function UsageCostDetail({ context }: UsageRecordSurfaceProps) {
         {showAccountInfo && record.account_cost !== undefined ? (
           <Row label="账号计费" value={money(record.account_cost)} tone="var(--ag-success)" />
         ) : null}
+        {verificationBlock(context)}
         <Row label="本次消费" value={money(record.actual_cost)} tone="var(--ag-warning)" />
         {isAdmin && !imageOnlyFixedPricing && record.sell_rate && record.sell_rate > 0 && record.billed_cost !== record.actual_cost ? (
           <>
