@@ -24,6 +24,10 @@ const (
 )
 
 // TaskError 结构化任务错误。Core 可按 Type 决定是否重试。
+// Code 是稳定的失败分类码（safety_rejected / bad_request / rate_limited / auth_failed /
+// server_error / http_<n>，以及 task_interrupted / reference_image_invalid / invalid_request /
+// upstream_forward_failed / upstream_no_image / image_store_failed 等确定性失败），随
+// error_code 落库；工作坊与控制台据此按界面语言渲染提示，Message 保持英文只作兜底。
 type TaskError struct {
 	Type      string `json:"type"`
 	Code      string `json:"code"`
@@ -58,9 +62,9 @@ func (rt *TaskRuntime) Fail(ctx context.Context, taskErr *TaskError) error {
 	if taskErr.Type != "" {
 		msg = fmt.Sprintf("[%s] %s", taskErr.Type, msg)
 	}
-	rt.logger.Warn("task_failed", "task_id", rt.taskID, "error_type", taskErr.Type, "error", msg)
+	rt.logger.Warn("task_failed", "task_id", rt.taskID, "error_type", taskErr.Type, "error_code", taskErr.Code, "error", msg)
 	userMsg := sanitizeTaskMessage(taskErr)
-	return rt.g.updateHostTask(ctx, rt.taskID, sdk.TaskStatusFailed, 0, nil, userMsg)
+	return rt.g.updateHostTask(ctx, rt.taskID, sdk.TaskStatusFailed, 0, nil, userMsg, WithTaskError(taskErr.Code, taskErr.Type))
 }
 
 func sanitizeTaskMessage(taskErr *TaskError) string {
