@@ -589,6 +589,50 @@ func priceMetadata(price float64, tier string, longContext bool) map[string]stri
 	return metadata
 }
 
+// 厂商官方牌价快照键（cost detail / 行级 Usage.Metadata），供用户侧账单验算：
+// list_unit_price × 用量 × 折扣 ÷ list_fx = 实扣 $。与 unit_price 同量纲
+// （原币 / 1M tokens），服务档位与长上下文阶梯的倍率同样作用在牌价上。
+const (
+	usageMetaListCurrency  = "list_currency"
+	usageMetaListUnitPrice = "list_unit_price"
+	usageMetaListFX        = "list_fx"
+)
+
+// annotateListPrice 给单档 cost detail metadata 追加官方牌价快照。
+//
+// listStandard 是该档原币标准牌价，baseStandard / baseEffective 是对应的 USD 标准价
+// 与本次实际生效价（已含 priority/flex 与长上下文倍率）：牌价按同一倍率
+// baseEffective ÷ baseStandard 折算，保证 list_unit_price ÷ list_fx ≈ unit_price
+// 在任何档位都成立。该档未声明牌价（或基准价为零无法定倍率）时一个键都不写。
+func annotateListPrice(metadata map[string]string, lp model.ListPrice, listStandard, baseStandard, baseEffective float64) {
+	if metadata == nil || !lp.Declared() || listStandard <= 0 || baseStandard <= 0 {
+		return
+	}
+	unit := listStandard * baseEffective / baseStandard
+	metadata[usageMetaListCurrency] = lp.Currency
+	metadata[usageMetaListUnitPrice] = fmt.Sprintf("%.10g", unit)
+	metadata[usageMetaListFX] = fmt.Sprintf("%.10g", lp.FX)
+}
+
+// setUsageListPrice 写/清行级牌价快照（list_currency / list_fx）。重算成本
+// （restoreMappedUsageModel 换回公开名）可能把有牌价的模型换成没有的，
+// 所以未声明时要主动清键，不能留上一轮的值。
+func setUsageListPrice(usage *sdk.Usage, lp model.ListPrice) {
+	if usage == nil {
+		return
+	}
+	if !lp.Declared() {
+		delete(usage.Metadata, usageMetaListCurrency)
+		delete(usage.Metadata, usageMetaListFX)
+		return
+	}
+	if usage.Metadata == nil {
+		usage.Metadata = map[string]string{}
+	}
+	usage.Metadata[usageMetaListCurrency] = lp.Currency
+	usage.Metadata[usageMetaListFX] = fmt.Sprintf("%.10g", lp.FX)
+}
+
 // fillUsageCost 用插件自己的模型规格填充 Usage 的平台标准成本。
 //
 // SDK 只承载通用 Usage 结构；OpenAI 的标准价格、服务档位和长上下文阶梯都留在
@@ -631,7 +675,13 @@ func fillUsageCostForModel(usage *sdk.Usage, billingModelID string, includeOutpu
 		inputMetadata["billing_model"] = billingModelID
 		cachedMetadata["billing_model"] = billingModelID
 		outputMetadata["billing_model"] = billingModelID
+	} else {
+		// 行级牌价只跟随本行模型本身；图像工具等按别的模型追加计费的分支不动它。
+		setUsageListPrice(usage, spec.ListPrice)
 	}
+	annotateListPrice(inputMetadata, spec.ListPrice, spec.ListPrice.Input, spec.InputPrice, prices.input)
+	annotateListPrice(cachedMetadata, spec.ListPrice, spec.ListPrice.CachedInput, spec.CachedPrice, prices.cached)
+	annotateListPrice(outputMetadata, spec.ListPrice, spec.ListPrice.Output, spec.OutputPrice, prices.output)
 
 	setUsageMetric(usage, sdk.UsageMetric{
 		Key:         usageMetricInputTokens,

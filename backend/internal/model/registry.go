@@ -84,6 +84,36 @@ type Spec struct {
 
 	// ImageInputUnitPrice 官方每张输入参考图单价（$/张），仅按张计费模型使用。
 	ImageInputUnitPrice float64
+
+	// ListPrice 厂商官方牌价（原币）。国内厂商模型（千问 / Kimi 等）官方标 ¥，
+	// 基准价（InputPrice 等）是 ¥ ÷ FX 折成的 USD；这里保留原币原值，供模型目录
+	// 展示与每笔用量快照（list_currency / list_unit_price / list_fx），让客户能用
+	// 「官方 ¥ 牌价 × 用量 × 折扣 = 实扣 $ × FX」逐笔验算。
+	// 纯展示锚点：计费仍走 USD 基准价，不读这里。零值 = 未声明（官方即 $ 牌价）。
+	ListPrice ListPrice
+
+	// Vendor 显式厂商标识（metadata 约定键 "vendor"）。空值时按模型 ID 关键字
+	// 推断（vendorForModel）；覆盖层新增的零插件模型（qwen / kimi 等）关键字
+	// 推断不到会回落 "openai"，由覆盖层条目 vendor 字段补正。
+	Vendor string
+}
+
+// ListPrice 厂商官方牌价（原币 / 1M tokens）与折算率。
+//
+// 恒等式：<k> ÷ FX ≈ 对应的 USD 基准价（InputPrice / CachedPrice / OutputPrice）。
+// FX 是「把牌价折成基准价」的那个常数（如 6.8），属于价格定义的一部分，改它
+// 等于改基准价；与 epay 充值汇率是两个参数，勿混。
+type ListPrice struct {
+	Currency    string  // ISO 4217，如 "CNY"；空 = 未声明
+	FX          float64 // 1 USD = FX 原币
+	Input       float64 // 原币 / 1M tokens
+	CachedInput float64
+	Output      float64
+}
+
+// Declared 报告是否声明了可用的牌价（币种与折算率齐全）。
+func (p ListPrice) Declared() bool {
+	return strings.TrimSpace(p.Currency) != "" && p.FX > 0
 }
 
 // std 快捷构造 standard / priority / flex 价格齐全的 Spec，
@@ -529,7 +559,11 @@ func toModelInfo(id string, spec Spec) sdk.ModelInfo {
 		mi.Metadata = map[string]string{"family": "gpt-image"}
 	}
 	mi.Metadata = priceMetadata(spec, mi.Metadata)
-	mi.Metadata["vendor"] = vendorForModel(id)
+	if vendor := strings.TrimSpace(spec.Vendor); vendor != "" {
+		mi.Metadata["vendor"] = vendor
+	} else {
+		mi.Metadata["vendor"] = vendorForModel(id)
+	}
 	if series := seriesForModel(id); series != "" {
 		mi.Metadata["series"] = series
 	}
@@ -607,6 +641,15 @@ func priceMetadata(spec Spec, meta map[string]string) map[string]string {
 	}
 	// 按张计费模型的每张输入参考图官方单价（纯展示；计费走 gateway 按张分支）。
 	put("price.image_input", spec.ImageInputUnitPrice)
+	// 厂商官方牌价（原币）。恒等式 price.list.<k> ÷ price.list.fx ≈ price.<k>，
+	// core 侧解析后校验；未声明牌价的模型一个 price.list.* 键都不写。
+	if lp := spec.ListPrice; lp.Declared() {
+		meta["price.list.currency"] = strings.ToUpper(strings.TrimSpace(lp.Currency))
+		put("price.list.fx", lp.FX)
+		put("price.list.input", lp.Input)
+		put("price.list.cached_input", lp.CachedInput)
+		put("price.list.output", lp.Output)
+	}
 	if spec.LongContextThreshold > 0 {
 		meta["long_context.threshold"] = strconv.Itoa(spec.LongContextThreshold)
 		put("long_context.input_multiplier", spec.LongContextInputMultiplier)

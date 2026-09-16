@@ -1,6 +1,8 @@
 package model
 
 import (
+	"bytes"
+	"log/slog"
 	"math"
 	"strings"
 	"testing"
@@ -506,5 +508,151 @@ func TestBuiltinGeminiImagePricing(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// ── 厂商官方牌价（price.list.* / 覆盖层 list_price）──
+
+const qwenListPriceOverlay = `[
+  {"id":"qwen3-max","name":"Qwen3 Max","vendor":"alibaba","context_window":262144,"max_output_tokens":65536,
+   "pricing":{"input":1.7647,"cached_input":0.3529,"output":5.2941},
+   "list_price":{"currency":"CNY","fx":6.8,"input":12,"cached_input":2.4,"output":36}}
+]`
+
+func TestCatalogOverlay_ListPriceParsedIntoSpec(t *testing.T) {
+	withCatalogOverlay(t, qwenListPriceOverlay)
+
+	spec := Lookup("qwen3-max")
+	want := ListPrice{Currency: "CNY", FX: 6.8, Input: 12, CachedInput: 2.4, Output: 36}
+	if spec.ListPrice != want {
+		t.Fatalf("ListPrice = %+v, want %+v", spec.ListPrice, want)
+	}
+	if !spec.ListPrice.Declared() {
+		t.Fatal("ListPrice should be declared")
+	}
+	// 牌价纯展示，USD 基准价必须原样保留，不能被牌价反算覆盖。
+	if spec.InputPrice != 1.7647 || spec.CachedPrice != 0.3529 || spec.OutputPrice != 5.2941 {
+		t.Fatalf("USD base price must stay untouched: %+v", spec)
+	}
+	if spec.Vendor != "alibaba" {
+		t.Fatalf("Vendor = %q, want alibaba", spec.Vendor)
+	}
+}
+
+func TestToModelInfo_ListPriceMetadataKeys(t *testing.T) {
+	withCatalogOverlay(t, qwenListPriceOverlay)
+
+	meta := toModelInfo("qwen3-max", Lookup("qwen3-max")).Metadata
+	for key, want := range map[string]string{
+		"price.input":             "1.7647",
+		"price.cached_input":      "0.3529",
+		"price.output":            "5.2941",
+		"price.list.currency":     "CNY",
+		"price.list.fx":           "6.8",
+		"price.list.input":        "12",
+		"price.list.cached_input": "2.4",
+		"price.list.output":       "36",
+		"vendor":                  "alibaba",
+	} {
+		if meta[key] != want {
+			t.Fatalf("%s = %q, want %q (meta=%v)", key, meta[key], want, meta)
+		}
+	}
+	// 恒等式：price.list.<k> ÷ fx ≈ price.<k>
+	if implied := 12 / 6.8; math.Abs(implied-1.7647) > 1e-3 {
+		t.Fatalf("identity broken: 12/6.8=%v vs 1.7647", implied)
+	}
+}
+
+// 未声明牌价的模型（含按采购价 ÷6.8 录入的 deepseek-v4-flash——那不是官方牌价）
+// 一个 price.list.* 键都不能出现。
+func TestToModelInfo_NoListPriceKeysWhenUndeclared(t *testing.T) {
+	ResetCatalogOverlay()
+	for _, id := range []string{"gpt-5.5", "deepseek-v4-flash-202605"} {
+		meta := toModelInfo(id, Lookup(id)).Metadata
+		for key := range meta {
+			if strings.HasPrefix(key, "price.list.") {
+				t.Fatalf("%s must not carry %s", id, key)
+			}
+		}
+	}
+	// 覆盖层条目不带 list_price 同样不写。
+	withCatalogOverlay(t, `[{"id":"kimi-k3","pricing":{"input":0.5882,"cached_input":0.1471,"output":2.3529}}]`)
+	for key := range toModelInfo("kimi-k3", Lookup("kimi-k3")).Metadata {
+		if strings.HasPrefix(key, "price.list.") {
+			t.Fatalf("kimi-k3 without list_price must not carry %s", key)
+		}
+	}
+}
+
+func TestCatalogOverlay_VendorDefaultsToInference(t *testing.T) {
+	withCatalogOverlay(t, `[{"id":"kimi-k3","pricing":{"input":0.5882,"cached_input":0.1471,"output":2.3529}}]`)
+	if got := toModelInfo("kimi-k3", Lookup("kimi-k3")).Metadata["vendor"]; got != "openai" {
+		t.Fatalf("vendor without overlay field = %q, want inferred openai", got)
+	}
+	withCatalogOverlay(t, `[{"id":"kimi-k3","vendor":"moonshot","pricing":{"input":0.5882,"cached_input":0.1471,"output":2.3529}}]`)
+	if got := toModelInfo("kimi-k3", Lookup("kimi-k3")).Metadata["vendor"]; got != "moonshot" {
+		t.Fatalf("vendor with overlay field = %q, want moonshot", got)
+	}
+	// 内置模型不受影响。
+	ResetCatalogOverlay()
+	if got := toModelInfo("gemini-3-pro-image", Lookup("gemini-3-pro-image")).Metadata["vendor"]; got != "google" {
+		t.Fatalf("builtin vendor = %q, want google", got)
+	}
+}
+
+func captureSlog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return &buf
+}
+
+// 恒等式不成立：插件侧只告警仍加载（core 写入侧才是 400 闸门）。
+func TestCatalogOverlay_ListPriceMismatchWarnsButLoads(t *testing.T) {
+	logs := captureSlog(t)
+	withCatalogOverlay(t, `[
+	  {"id":"qwen3-max","pricing":{"input":2,"cached_input":0.2,"output":6},
+	   "list_price":{"currency":"CNY","fx":6.8,"input":12,"cached_input":2.4,"output":36}}
+	]`)
+	spec := Lookup("qwen3-max")
+	if spec.ListPrice.Input != 12 || spec.ListPrice.Currency != "CNY" {
+		t.Fatalf("mismatched list price must still load: %+v", spec.ListPrice)
+	}
+	if spec.InputPrice != 2 {
+		t.Fatalf("base price must not be touched: %v", spec.InputPrice)
+	}
+	if !strings.Contains(logs.String(), "model_list_price_mismatch") {
+		t.Fatalf("expected mismatch warning, logs=%q", logs.String())
+	}
+}
+
+// 4 位小数的 USD 录入（12 ÷ 6.8 = 1.76470588… 录成 1.7647）不能被判成不一致。
+func TestCatalogOverlay_ListPriceRoundedBaseDoesNotWarn(t *testing.T) {
+	logs := captureSlog(t)
+	withCatalogOverlay(t, qwenListPriceOverlay)
+	if strings.Contains(logs.String(), "model_list_price_mismatch") {
+		t.Fatalf("rounded base price must pass identity check, logs=%q", logs.String())
+	}
+}
+
+// 缺币种或折算率的牌价整体丢弃：没有折算率的原币数字无法验算。
+func TestCatalogOverlay_ListPriceWithoutFXDropped(t *testing.T) {
+	logs := captureSlog(t)
+	withCatalogOverlay(t, `[
+	  {"id":"qwen3-max","pricing":{"input":1.7647,"cached_input":0.3529,"output":5.2941},
+	   "list_price":{"currency":"CNY","input":12,"output":36}}
+	]`)
+	spec := Lookup("qwen3-max")
+	if spec.ListPrice.Declared() || spec.ListPrice.Input != 0 {
+		t.Fatalf("list price without fx must be dropped: %+v", spec.ListPrice)
+	}
+	if !strings.Contains(logs.String(), "model_list_price_invalid") {
+		t.Fatalf("expected invalid warning, logs=%q", logs.String())
+	}
+	if _, ok := toModelInfo("qwen3-max", spec).Metadata["price.list.currency"]; ok {
+		t.Fatal("dropped list price must not leak into metadata")
 	}
 }
