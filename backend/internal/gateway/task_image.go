@@ -288,6 +288,24 @@ func parseUpstreamTaskErrorBody(statusCode int, body []byte) (message, errType, 
 	}
 	errValue, ok := payload["error"]
 	if !ok {
+		// MiniMax（canvas-20 异步任务）失败体没有 error 信封，原因在
+		// base_resp.status_msg；中转常见的顶层 message / msg 也一并认。不认这些形态
+		// 客户只会看到「upstream HTTP 400」——2026-09-16 成员被内容安全拒绝却无从得知
+		// 该改提示词。
+		if baseResp, ok := payload["base_resp"].(map[string]any); ok {
+			if v := strings.TrimSpace(stringFromAny(baseResp["status_msg"])); v != "" {
+				message = truncate(v, 500)
+			}
+			if v := strings.TrimSpace(stringFromAny(baseResp["status_code"])); v != "" && v != "0" {
+				errCode = v
+			}
+			return message, "", errCode
+		}
+		for _, key := range []string{"message", "msg"} {
+			if v := strings.TrimSpace(stringFromAny(payload[key])); v != "" {
+				return truncate(v, 500), "", ""
+			}
+		}
 		return message, "", ""
 	}
 	if errObj, ok := errValue.(map[string]any); ok {
