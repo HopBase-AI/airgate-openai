@@ -118,6 +118,33 @@ func TestFillUsageCostOffPeakCoversCachedInput(t *testing.T) {
 	}
 }
 
+// 官方牌价快照必须跟着时段一起减半——否则账单验算块里
+// list_unit_price ÷ list_fx ≈ unit_price 的恒等式在低峰时段整体差 2 倍。
+func TestOffPeakAlsoScalesListPriceSnapshot(t *testing.T) {
+	const raw = `[{"id":"deepseek-v4.1-flash","name":"DeepSeek V4.1 Flash",
+	  "pricing":{"input":0.29411764705882354,"output":1.1764705882352942,"cached_input":0.0058823529411764705},
+	  "list_price":{"currency":"CNY","fx":6.8,"input":2,"output":8,"cached_input":0.04},
+	  "time_pricing":{"timezone":"Asia/Shanghai","off_peak_multiplier":0.5,
+	    "peak_windows":[{"weekdays":["mon","tue","wed","thu","fri"],"start":"09:00","end":"12:00"},
+	                    {"weekdays":["mon","tue","wed","thu","fri"],"start":"14:00","end":"18:00"}]}}]`
+	if _, err := model.SetCatalogOverlayJSON(raw); err != nil {
+		t.Fatalf("装载覆盖层失败: %v", err)
+	}
+	t.Cleanup(model.ResetCatalogOverlay)
+	freezeBillingClock(t, 2026, time.September, 17, 22, 0) // 低峰
+
+	usage := newTokenUsage("deepseek-v4.1-flash", "", 1_000_000, 1_000_000, 0, 0, 0)
+	fillUsageCost(usage)
+
+	// ¥2 的一半 = ¥1；同时 ¥1 ÷ 6.8 应等于本次生效的 USD 单价。
+	if got := detailMetadataValue(usage, usageCostInput, "list_unit_price"); got != "1" {
+		t.Fatalf("低峰输入牌价快照 = %q, want \"1\"（¥2 的一半）", got)
+	}
+	if got := detailMetadataValue(usage, usageCostOutput, "list_unit_price"); got != "4" {
+		t.Fatalf("低峰输出牌价快照 = %q, want \"4\"（¥8 的一半）", got)
+	}
+}
+
 // metricMetadataValue 取指定指标单价 metadata 里的某个键，测试辅助。
 func metricMetadataValue(usage *sdk.Usage, metricKey, metadataKey string) string {
 	if usage == nil {
@@ -126,6 +153,19 @@ func metricMetadataValue(usage *sdk.Usage, metricKey, metadataKey string) string
 	for _, m := range usage.Metrics {
 		if m.Key == metricKey {
 			return m.Metadata[metadataKey]
+		}
+	}
+	return ""
+}
+
+// detailMetadataValue 取指定费用明细 metadata 里的某个键，测试辅助。
+func detailMetadataValue(usage *sdk.Usage, detailKey, metadataKey string) string {
+	if usage == nil {
+		return ""
+	}
+	for _, d := range usage.CostDetails {
+		if d.Key == detailKey {
+			return d.Metadata[metadataKey]
 		}
 	}
 	return ""
