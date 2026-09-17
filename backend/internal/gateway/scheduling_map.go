@@ -13,9 +13,27 @@ import (
 //     docs/architecture/current/plugin-contract.md 约定表）。
 func anthropicRouteMetadata() map[string]string {
 	return map[string]string{
-		"error_format":         "anthropic",
-		"scheduling_model_map": anthropicSchedulingModelMapJSON(),
+		"error_format":              "anthropic",
+		"scheduling_model_map":      anthropicSchedulingModelMapJSON(),
+		"subscription_output_bound": anthropicOutputBoundJSON,
 	}
+}
+
+// subscription_output_bound 告诉 core 这条协议用哪个字段限制输出长度。
+// 订阅制分组按「本次请求最多花多少」准入：模型的输出上限值钱远超套餐给单条消息的
+// 额度,声明了这个字段,core 就把输出封到额度买得起的长度并改写请求,而不是把超额
+// 请求直接拒掉。每条路由按自己的协议声明,不能相互套用。
+const (
+	anthropicOutputBoundJSON = `{"fields":["max_tokens"]}`
+	// Chat Completions：推理模型只认 max_completion_tokens,老字段仍兼容,
+	// 因此优先写新字段;调用方已经传了哪个就收窄哪个。
+	chatCompletionsOutputBoundJSON = `{"fields":["max_completion_tokens","max_tokens"]}`
+	responsesOutputBoundJSON       = `{"fields":["max_output_tokens"]}`
+)
+
+// outputBoundMetadata 只声明输出上限字段的路由元数据。
+func outputBoundMetadata(contract string) map[string]string {
+	return map[string]string{"subscription_output_bound": contract}
 }
 
 // anthropicSchedulingModelMapJSON 生成前缀映射表 JSON。
