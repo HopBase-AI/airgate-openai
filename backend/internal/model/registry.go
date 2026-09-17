@@ -65,6 +65,10 @@ type Spec struct {
 	LongContextOutputMultiplier float64
 	LongContextCachedMultiplier float64
 
+	// TimePricing 峰谷定价：上面的标准价即高峰价，落在高峰时段之外时整体打折
+	// （DeepSeek Flash 系列口径，见 time_pricing.go）。nil = 价格不随时段浮动。
+	TimePricing *TimePricing
+
 	// OutputExcludesReasoning 标记上游 usage 的 completion_tokens 不含
 	// reasoning tokens（xAI Grok 口径，与 OpenAI 相反）。计费时须把
 	// completion_tokens_details.reasoning_tokens 并入输出，否则推理型

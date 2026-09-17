@@ -542,6 +542,41 @@ func pricesForServiceTier(spec model.Spec, tier string) tokenPrices {
 	}
 }
 
+// billingNow 计费时刻的取值口径：峰谷定价按它判定高峰/低峰。
+// 抽成变量是为了测试能钉死时刻——生产恒为 time.Now。
+//
+// 取的是「算账那一刻」（响应结束），不是请求发起时刻：跨时段边界的长请求会按
+// 结束时段计价，与上游按完成时刻结算的口径一致，且 fillUsageCost 的 40 余处
+// 调用点无需层层透传请求起始时间。
+var billingNow = time.Now
+
+// priceFlags 记录本次定价链上生效的非标准档位，用于写进单价 metadata 便于对账。
+type priceFlags struct {
+	longContext bool
+	offPeak     bool
+}
+
+// resolveTokenPrices 统一的定价链：服务档位 → 峰谷时段 → 长上下文阶梯。
+// 三者互相独立、可叠加，顺序不影响结果（都是乘法）。
+func resolveTokenPrices(spec model.Spec, tier string, inputTokens, cachedInputTokens int) (tokenPrices, priceFlags) {
+	prices, offPeak := applyOffPeakPricing(spec, pricesForServiceTier(spec, tier))
+	prices, longContext := applyLongContextPricing(spec, prices, inputTokens, cachedInputTokens)
+	return prices, priceFlags{longContext: longContext, offPeak: offPeak}
+}
+
+// applyOffPeakPricing 对配置了峰谷定价的模型按当前时刻整体打折。
+// 注册表里的标准价是高峰价，所以只会往下折，不会往上加。
+func applyOffPeakPricing(spec model.Spec, prices tokenPrices) (tokenPrices, bool) {
+	multiplier := spec.TimePricing.Multiplier(billingNow())
+	if multiplier >= 1 {
+		return prices, false
+	}
+	prices.input *= multiplier
+	prices.cached *= multiplier
+	prices.output *= multiplier
+	return prices, true
+}
+
 func fallbackPrice(value, fallback float64) float64 {
 	if value > 0 {
 		return value
@@ -575,7 +610,7 @@ func tokenCost(tokens int, pricePerMillion float64) float64 {
 	return float64(tokens) * pricePerMillion / 1_000_000
 }
 
-func priceMetadata(price float64, tier string, longContext bool) map[string]string {
+func priceMetadata(price float64, tier string, flags priceFlags) map[string]string {
 	metadata := map[string]string{
 		"unit_price": fmt.Sprintf("%.10g", price),
 		"unit":       "USD/1M tokens",
@@ -583,8 +618,12 @@ func priceMetadata(price float64, tier string, longContext bool) map[string]stri
 	if tier != "" {
 		metadata["service_tier"] = tier
 	}
-	if longContext {
+	if flags.longContext {
 		metadata["long_context"] = "true"
+	}
+	if flags.offPeak {
+		// 账单与对账要能一眼看出这笔为什么比牌价低。
+		metadata["pricing_window"] = "off_peak"
 	}
 	return metadata
 }
@@ -654,12 +693,7 @@ func fillUsageCostForModel(usage *sdk.Usage, billingModelID string, includeOutpu
 	inputTokens := usageMetricInt(usage, usageMetricInputTokens)
 	outputTokens := usageMetricInt(usage, usageMetricOutputTokens)
 	cachedInputTokens := usageMetricInt(usage, usageMetricCachedInputTokens)
-	prices, longContext := applyLongContextPricing(
-		spec,
-		pricesForServiceTier(spec, serviceTier),
-		inputTokens,
-		cachedInputTokens,
-	)
+	prices, flags := resolveTokenPrices(spec, serviceTier, inputTokens, cachedInputTokens)
 
 	inputCost := tokenCost(inputTokens, prices.input)
 	cachedCost := tokenCost(cachedInputTokens, prices.cached)
@@ -668,9 +702,9 @@ func fillUsageCostForModel(usage *sdk.Usage, billingModelID string, includeOutpu
 		outputCost = 0
 	}
 
-	inputMetadata := priceMetadata(prices.input, serviceTier, longContext)
-	cachedMetadata := priceMetadata(prices.cached, serviceTier, longContext)
-	outputMetadata := priceMetadata(prices.output, serviceTier, longContext)
+	inputMetadata := priceMetadata(prices.input, serviceTier, flags)
+	cachedMetadata := priceMetadata(prices.cached, serviceTier, flags)
+	outputMetadata := priceMetadata(prices.output, serviceTier, flags)
 	if billingModelID != usage.Model {
 		inputMetadata["billing_model"] = billingModelID
 		cachedMetadata["billing_model"] = billingModelID
@@ -826,12 +860,11 @@ func imageTokenBillingModel(modelID string) string {
 	return modelID
 }
 
-func usagePricesForBillingModel(usage *sdk.Usage, billingModelID string) (tokenPrices, bool) {
+func usagePricesForBillingModel(usage *sdk.Usage, billingModelID string) (tokenPrices, priceFlags) {
 	spec := model.Lookup(billingModelID)
-	serviceTier := usageServiceTier(usage)
-	return applyLongContextPricing(
+	return resolveTokenPrices(
 		spec,
-		pricesForServiceTier(spec, serviceTier),
+		usageServiceTier(usage),
 		usageMetricInt(usage, usageMetricInputTokens),
 		usageMetricInt(usage, usageMetricCachedInputTokens),
 	)
@@ -988,10 +1021,10 @@ func fillUsageCostWithImageTool(usage *sdk.Usage, numImages int, size string, im
 	if numImages <= 0 && imageInputTokens <= 0 && imageOutputTokens <= 0 {
 		return
 	}
-	prices, longContext := usagePricesForBillingModel(usage, billingModelID)
+	prices, flags := usagePricesForBillingModel(usage, billingModelID)
 	serviceTier := usageServiceTier(usage)
 	if imageInputTokens > 0 {
-		metadata := priceMetadata(prices.input, serviceTier, longContext)
+		metadata := priceMetadata(prices.input, serviceTier, flags)
 		metadata["billing_model"] = billingModelID
 		metadata["tokens"] = fmt.Sprintf("%d", imageInputTokens)
 		setUsageCostDetail(usage, sdk.UsageCostDetail{
