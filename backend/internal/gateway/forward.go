@@ -507,6 +507,25 @@ func (g *OpenAIGateway) forwardAPIKey(ctx context.Context, req *sdk.ForwardReque
 		}
 	}
 
+	// 火山方舟对 Responses API 做严格 JSON 解码，任何它不认识的字段直接 400
+	// （见 responses_ark_fields.go 的文件头）。400 会触发 core failover，而组 55 的
+	// 备用上游成本倍率高于卖价——一个字段不兼容就是持续负毛利，所以必须在发出去
+	// 之前按火山口径把未知字段剥掉。
+	//
+	// 与模型映射同理：只改「发往上游的字节」，不碰 req.Body。计费、用量、响应还原
+	// 都从 req.Body 读，改了它等于把上游的兼容问题带进计费链路。
+	if methodAllowsBody(reqMethod) && len(upstreamBody) > 0 {
+		if sanitized, dropped := sanitizeResponsesBodyForAccount(account, upstreamBody, reqPath); len(dropped) > 0 {
+			upstreamBody = sanitized
+			logger.Info("responses_unsupported_fields_stripped",
+				sdk.LogFieldAccountID, account.ID,
+				sdk.LogFieldModel, req.Model,
+				"path", reqPath,
+				"fields", dropped,
+			)
+		}
+	}
+
 	var bodyReader io.Reader
 	if methodAllowsBody(reqMethod) && len(upstreamBody) > 0 {
 		bodyReader = bytes.NewReader(upstreamBody)
