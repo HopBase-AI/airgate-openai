@@ -219,3 +219,40 @@ func sortStrings(s []string) {
 		}
 	}
 }
+
+// TestAnthropicBridgeBodyIsArkSafe 钉住 Anthropic → Responses 桥接的固定参数：
+// anthropic_convert.go 对齐的是 Codex CLI 的字段集，其中 reasoning.summary 与
+// text.verbosity 正是火山方舟不认的两个，不裁掉 Claude Code 打方舟账号必 400。
+func TestAnthropicBridgeBodyIsArkSafe(t *testing.T) {
+	// 与 convertAnthropicRequestToResponses 的固定参数一致
+	bridge := []byte(`{"model":"m","parallel_tool_calls":true,` +
+		`"reasoning":{"effort":"medium","summary":"auto"},"stream":true,"store":false,` +
+		`"include":["reasoning.encrypted_content"],"text":{"verbosity":"medium"},` +
+		`"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}`)
+
+	out, dropped := sanitizeResponsesBodyForAccount(arkAccount(nil), bridge, "/v1/responses")
+	want := []string{"reasoning.summary", "text.verbosity"}
+	got := append([]string(nil), dropped...)
+	sortStrings(got)
+	sortStrings(want)
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("dropped = %v, want %v", got, want)
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(out, &body); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	// store=false 是客户数据不落上游存储的红线，裁剪绝不能把它带走
+	if store, ok := body["store"].(bool); !ok || store {
+		t.Fatalf("store must stay false, got %v", body["store"])
+	}
+	for _, key := range []string{"include", "parallel_tool_calls", "stream", "reasoning", "text"} {
+		if _, ok := body[key]; !ok {
+			t.Fatalf("bridge field %q was dropped", key)
+		}
+	}
+	if eff := body["reasoning"].(map[string]any)["effort"]; eff != "medium" {
+		t.Fatalf("reasoning.effort lost: %v", eff)
+	}
+}
