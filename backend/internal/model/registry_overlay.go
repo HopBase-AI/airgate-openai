@@ -107,6 +107,7 @@ type overlayEntry struct {
 	Pricing       *overlayPricing     `json:"pricing,omitempty"`
 	LongContext   *overlayLongContext `json:"long_context,omitempty"`
 	ListPrice     *overlayListPrice   `json:"list_price,omitempty"`
+	TimePricing   *TimePricingConfig  `json:"time_pricing,omitempty"`
 	// Vendor 厂商标识（metadata 约定键 "vendor"）；零插件模型（qwen / kimi 等）
 	// 关键字推断不到，靠这里补正。空 = 沿用推断。
 	Vendor string `json:"vendor,omitempty"`
@@ -218,6 +219,9 @@ func applyOverlay(id string, base Spec, e overlayEntry) Spec {
 	if e.ListPrice != nil {
 		applyListPriceOverlay(&base, id, *e.ListPrice)
 	}
+	if e.TimePricing != nil {
+		applyTimePricingOverlay(&base, id, e.TimePricing)
+	}
 	return base
 }
 
@@ -263,6 +267,21 @@ func applyListPriceOverlay(spec *Spec, id string, p overlayListPrice) {
 		}
 	}
 	spec.ListPrice = lp
+}
+
+// applyTimePricingOverlay 应用峰谷定价配置。配置不合法时**保持标准价**并告警：
+// 标准价是高峰价，忽略配置只会按高峰价收，绝不会因为一处配置笔误静默半价。
+func applyTimePricingOverlay(spec *Spec, modelID string, cfg *TimePricingConfig) {
+	tp, err := ParseTimePricing(cfg)
+	if err != nil {
+		slog.Warn("model_time_pricing_invalid",
+			"model", modelID,
+			"error", err,
+			"hint", "该模型的 time_pricing 已整体忽略，按标准价(高峰价)计费",
+		)
+		return
+	}
+	spec.TimePricing = tp
 }
 
 func applyPricingOverlay(spec *Spec, p overlayPricing) {
