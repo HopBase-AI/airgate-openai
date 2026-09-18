@@ -726,6 +726,21 @@ func TestConvertResponsesEventToAnthropic_MessageStartEmitsPing(t *testing.T) {
 	}
 }
 
+func TestConvertResponsesEventToAnthropic_LengthIncompleteIsNormalStop(t *testing.T) {
+	state := &anthropicStreamState{}
+	line := []byte(`data: {"type":"response.incomplete","response":{"id":"resp_length","status":"incomplete","incomplete_details":{"reason":"length"},"usage":{"input_tokens":7,"output_tokens":1}}}`)
+	out := convertResponsesEventToAnthropic(line, nil, state, "claude-sonnet-4-6")
+	if strings.Contains(out, `"type":"error"`) {
+		t.Fatalf("length incomplete should not emit an error: %s", out)
+	}
+	if !strings.Contains(out, `"stop_reason":"max_tokens"`) {
+		t.Fatalf("length incomplete should map to max_tokens: %s", out)
+	}
+	if !strings.Contains(out, "event: message_stop") {
+		t.Fatalf("length incomplete should close the Anthropic stream: %s", out)
+	}
+}
+
 func TestNormalizeAnthropicMessageID(t *testing.T) {
 	cases := map[string]string{
 		"":                              "",

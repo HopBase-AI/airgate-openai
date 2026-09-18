@@ -49,7 +49,7 @@ func isChatCompletionsRequest(req *sdk.ForwardRequest) bool {
 // 映射为 Chat Completions 的 finish_reason。
 func mapStopReasonToFinishReason(stopReason string, hasToolCalls bool) string {
 	switch strings.ToLower(strings.TrimSpace(stopReason)) {
-	case "max_output_tokens":
+	case "length", "max_output_tokens":
 		return "length"
 	case "content_filter":
 		return "content_filter"
@@ -315,7 +315,7 @@ func (s *chatCompletionsStreamWriter) translateEvent(eventType string, data []by
 		status := gjson.GetBytes(data, "response.status").String()
 		switch status {
 		case "incomplete":
-			if gjson.GetBytes(data, "response.incomplete_details.reason").String() == "max_output_tokens" {
+			if isNormalIncompleteReason(gjson.GetBytes(data, "response.incomplete_details.reason").String()) {
 				finishReason = "length"
 			}
 		case "completed":
@@ -329,7 +329,7 @@ func (s *chatCompletionsStreamWriter) translateEvent(eventType string, data []by
 		return [][]byte{s.makeFinishChunk(finishReason)}
 
 	case "response.incomplete":
-		if gjson.GetBytes(data, "response.incomplete_details.reason").String() != "max_output_tokens" {
+		if !isNormalIncompleteReason(gjson.GetBytes(data, "response.incomplete_details.reason").String()) {
 			return nil
 		}
 		s.finalized = true

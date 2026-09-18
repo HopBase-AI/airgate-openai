@@ -427,6 +427,14 @@ func TestBuildNonStreamResponses_Fallback(t *testing.T) {
 	}
 }
 
+func TestMapStopReasonToFinishReasonLength(t *testing.T) {
+	for _, reason := range []string{"length", "max_output_tokens"} {
+		if got := mapStopReasonToFinishReason(reason, false); got != "length" {
+			t.Errorf("mapStopReasonToFinishReason(%q) = %q, want length", reason, got)
+		}
+	}
+}
+
 func TestIsChatCompletionsRequest(t *testing.T) {
 	cases := []struct {
 		name    string

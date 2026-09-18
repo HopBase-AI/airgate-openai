@@ -208,7 +208,13 @@ func convertResponsesEventToAnthropic(rawLine []byte, originalRequest []byte, st
 		}
 		return ""
 
-	case "response.completed", "response.done":
+	case "response.completed", "response.done", "response.incomplete":
+		if typeStr == "response.incomplete" {
+			reason := root.Get("response.incomplete_details.reason").String()
+			if !isNormalIncompleteReason(reason) {
+				return buildAnthropicStreamError("api_error", "response incomplete: "+reason)
+			}
+		}
 		// 提取 usage
 		inputTokens, outputTokens, cachedTokens, reasoningTokens := extractResponsesUsage(root.Get("response.usage"))
 		state.InputTokens = int(inputTokens)
@@ -237,7 +243,11 @@ func convertResponsesEventToAnthropic(rawLine []byte, originalRequest []byte, st
 		if state.HasToolCall {
 			finalStop = "tool_use"
 		} else {
-			finalStop = normalizeAnthropicStopReason(root.Get("response.stop_reason").String())
+			stopReason := root.Get("response.stop_reason").String()
+			if stopReason == "" && typeStr == "response.incomplete" {
+				stopReason = root.Get("response.incomplete_details.reason").String()
+			}
+			finalStop = normalizeAnthropicStopReason(stopReason)
 		}
 		// 最终再过一层白名单校验，只允许 Anthropic 官方合法枚举
 		finalStop = ensureAnthropicStopReason(finalStop)
@@ -288,12 +298,6 @@ func convertResponsesEventToAnthropic(rawLine []byte, originalRequest []byte, st
 		errType := mapResponsesErrorType(root.Get("response.error.type").String(), root.Get("response.error.code").String())
 		return buildAnthropicStreamError(errType, errMsg)
 
-	case "response.incomplete":
-		reason := root.Get("response.incomplete_details.reason").String()
-		if reason == "" {
-			reason = "unknown"
-		}
-		return buildAnthropicStreamError("api_error", "response incomplete: "+reason)
 	}
 
 	// 忽略未知事件（web_search_call.* 等）
@@ -697,7 +701,7 @@ func translateResponsesSSEToAnthropicSSE(
 					updateSessionStateResponseID(session.SessionKey, responseID)
 				}
 			}
-			if eventType == "response.completed" || eventType == "response.done" {
+			if eventType == "response.completed" || eventType == "response.done" || eventType == "response.incomplete" {
 				if serviceTier == "" {
 					serviceTier = firstNonEmptyTier(gjson.Get(data, "response.service_tier").String(), defaultServiceTier)
 				}
@@ -726,7 +730,7 @@ func translateResponsesSSEToAnthropicSSE(
 					streamErr = fmt.Errorf("upstream error: %s", errMsg)
 				}
 			}
-			if eventType == "response.incomplete" {
+			if eventType == "response.incomplete" && !isNormalIncompleteReason(gjson.Get(data, "response.incomplete_details.reason").String()) {
 				reason := gjson.Get(data, "response.incomplete_details.reason").String()
 				streamErr = fmt.Errorf("incomplete response: %s", reason)
 			}

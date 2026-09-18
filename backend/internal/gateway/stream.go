@@ -969,7 +969,7 @@ func ParseSSEStream(reader io.Reader, handler WSEventHandler) WSResult {
 					}
 				}
 			}
-			if reason == "max_output_tokens" {
+			if isNormalIncompleteReason(reason) {
 				result.CompletedEventRaw = append([]byte(nil), []byte(data)...)
 				result.StopReason = reason
 			} else {
@@ -1009,7 +1009,25 @@ func ParseSSEStream(reader io.Reader, handler WSEventHandler) WSResult {
 // Chat Completions API 以 [DONE] 结束（调用方在解析 data 前已单独处理）。
 func isStreamCompletionEvent(data string) bool {
 	eventType := gjson.Get(data, "type").String()
-	return eventType == "response.completed" || eventType == "response.done"
+	if eventType == "response.completed" || eventType == "response.done" {
+		return true
+	}
+	if eventType == "response.incomplete" {
+		return isNormalIncompleteReason(gjson.Get(data, "response.incomplete_details.reason").String())
+	}
+	return false
+}
+
+// isNormalIncompleteReason matches the Responses API's normal output-limit
+// termination reasons. Ark uses "length" while other compatible providers
+// use "max_output_tokens" for the same successful-but-incomplete outcome.
+func isNormalIncompleteReason(reason string) bool {
+	switch strings.TrimSpace(reason) {
+	case "length", "max_output_tokens":
+		return true
+	default:
+		return false
+	}
 }
 
 func streamDiagnosticEventType(data string) string {
@@ -1316,7 +1334,7 @@ func parseSSEUsage(data []byte, out *sdk.Usage, toolImageIn, toolImageOut *int) 
 	}
 
 	switch eventType {
-	case "response.completed", "response.done", "response.failed":
+	case "response.completed", "response.done", "response.failed", "response.incomplete":
 		resp := gjson.GetBytes(data, "response")
 		if !resp.Exists() {
 			return
@@ -1416,6 +1434,9 @@ func parseSSEFailureEvent(data []byte) error {
 		reason := gjson.GetBytes(data, "response.incomplete_details.reason").String()
 		if reason == "" {
 			reason = "unknown"
+		}
+		if isNormalIncompleteReason(reason) {
+			return nil
 		}
 		return fmt.Errorf("upstream returned an incomplete response: %s", reason)
 	}

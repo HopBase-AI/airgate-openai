@@ -148,7 +148,7 @@ func wsEventIsTerminalFailure(eventType string, data []byte) bool {
 	case "response.failed", "error":
 		return true
 	case "response.incomplete":
-		return gjson.GetBytes(data, "response.incomplete_details.reason").String() != "max_output_tokens"
+		return !isNormalIncompleteReason(gjson.GetBytes(data, "response.incomplete_details.reason").String())
 	default:
 		return false
 	}
@@ -159,7 +159,7 @@ func wsEventIsSuccessfulCompletion(eventType string, data []byte) bool {
 	case "response.completed", "response.done":
 		return true
 	case "response.incomplete":
-		return gjson.GetBytes(data, "response.incomplete_details.reason").String() == "max_output_tokens"
+		return isNormalIncompleteReason(gjson.GetBytes(data, "response.incomplete_details.reason").String())
 	default:
 		return false
 	}
@@ -451,7 +451,7 @@ func ReceiveWSResponse(ctx context.Context, conn *websocket.Conn, handler WSEven
 					}
 				}
 			}
-			if reason == "max_output_tokens" {
+			if isNormalIncompleteReason(reason) {
 				result.CompletedEventRaw = append([]byte(nil), msg...)
 				result.StopReason = reason
 			} else {

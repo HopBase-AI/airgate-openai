@@ -622,6 +622,53 @@ func TestHandleStreamResponseTreatsCompletedEmptyStreamAsFailure(t *testing.T) {
 	}
 }
 
+func TestHandleStreamResponseTreatsLengthIncompleteAsSuccessfulTermination(t *testing.T) {
+	body := strings.Join([]string{
+		`event: response.created`,
+		`data: {"type":"response.created","response":{"id":"resp_length","status":"in_progress"}}`,
+		"",
+		`event: response.output_text.delta`,
+		`data: {"type":"response.output_text.delta","delta":"partial"}`,
+		"",
+		`event: response.output_item.done`,
+		`data: {"type":"response.output_item.done","item":{"id":"rs_1","type":"reasoning","status":"incomplete","summary":[{"type":"summary_text","text":"partial"}]}}`,
+		"",
+		`event: response.incomplete`,
+		`data: {"type":"response.incomplete","response":{"id":"resp_length","status":"incomplete","incomplete_details":{"reason":"length"},"usage":{"input_tokens":7,"output_tokens":1,"total_tokens":8}}}`,
+		"",
+	}, "\n")
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       io.NopCloser(strings.NewReader(body)),
+	}
+	w := httptest.NewRecorder()
+
+	outcome, err := handleStreamResponse(resp, w, time.Now(), "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if outcome.Kind != sdk.OutcomeSuccess {
+		t.Fatalf("expected OutcomeSuccess, got %v", outcome.Kind)
+	}
+	if outcome.Usage == nil || usageMetricInt(outcome.Usage, usageMetricInputTokens) != 7 || usageMetricInt(outcome.Usage, usageMetricOutputTokens) != 1 {
+		t.Fatalf("usage = %#v, want input=7 output=1", outcome.Usage)
+	}
+	got := w.Body.String()
+	if !strings.Contains(got, `"type":"response.incomplete"`) || strings.Contains(got, `"type":"error"`) {
+		t.Fatalf("length termination was not forwarded as a normal event: %q", got)
+	}
+}
+
+func TestParseSSEFailureEventOnlyTreatsLengthAsNormalIncomplete(t *testing.T) {
+	if err := parseSSEFailureEvent([]byte(`{"type":"response.incomplete","response":{"incomplete_details":{"reason":"length"}}}`)); err != nil {
+		t.Fatalf("length should be normal termination: %v", err)
+	}
+	if err := parseSSEFailureEvent([]byte(`{"type":"response.incomplete","response":{"incomplete_details":{"reason":"content_filter"}}}`)); err == nil {
+		t.Fatal("non-length incomplete reason should remain an error")
+	}
+}
+
 func TestHandleStreamResponseFlushesBufferedPreludeWhenOutputArrives(t *testing.T) {
 	body := strings.Join([]string{
 		`data: {"id":"chatcmpl_test","choices":[{"delta":{"role":"assistant"},"finish_reason":null}]}`,
