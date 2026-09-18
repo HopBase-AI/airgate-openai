@@ -64,6 +64,7 @@ func BuildPluginInfo() sdk.PluginInfo {
 				Fields: []sdk.CredentialField{
 					{Key: "api_key", Label: "API Key", Type: "password", Required: true, Placeholder: "sk-..."},
 					{Key: "base_url", Label: "API 地址", Type: "text", Required: false, Placeholder: "https://api.openai.com"},
+					{Key: "stream_idle_timeout", Label: "流式空闲超时", Type: "text", Required: false, Placeholder: "可选；正数时长，如 120s 或 180s；留空继承插件配置（默认 60s）"},
 					{Key: gptImage2UpstreamModelCredential, Label: "GPT Image 2 上游模型 ID", Type: "text", Required: false, Placeholder: "留空时保持 gpt-image-2；特殊上游可填写专用模型 ID（仅对 gpt-image-2 生效，多模型请用「图像模型 ID 映射」）"},
 					{Key: imageModelMapCredential, Label: "图像模型 ID 映射", Type: "text", Required: false, Placeholder: `可选；JSON 对象，公开图像模型名→该上游真实 ID，对任意图像模型生效且优先于「GPT Image 2 上游模型 ID」，例如 {"gpt-image-2.5-flare":"MM-H3-sft-Mlogic-High-25-image"}`},
 					{Key: imagesPathPrefixCredential, Label: "图像端点路径前缀", Type: "text", Required: false, Placeholder: "可选；非标图像中转的路径前缀，生成/编辑分别拼 /generations、/edits，例如 /v1/content/models/canvas-20；可用 {model} 占位按映射后的上游模型 ID 替换，如 /v1/content/models/{model}"},
@@ -81,6 +82,7 @@ func BuildPluginInfo() sdk.PluginInfo {
 					{Key: "refresh_token", Label: "Refresh Token", Type: "password", Required: false, Placeholder: "授权后自动填充"},
 					{Key: "session_token", Label: "Session Token (JWE)", Type: "password", Required: false, Placeholder: "Session 导入后自动填充"},
 					{Key: "chatgpt_account_id", Label: "ChatGPT Account ID", Type: "text", Required: false, Placeholder: "授权后自动填充", EditDisabled: true},
+					{Key: "stream_idle_timeout", Label: "流式空闲超时", Type: "text", Required: false, Placeholder: "可选；正数时长，如 120s 或 180s；留空继承插件配置（默认 60s）"},
 				},
 			},
 		},

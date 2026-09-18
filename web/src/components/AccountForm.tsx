@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useId, useMemo, useState } from 'react';
 import { cssVar } from '@doudou-start/airgate-theme';
 import type {
   AccountFormProps,
@@ -108,6 +108,8 @@ const pillActiveStyle: React.CSSProperties = {
 
 type AccountType = 'apikey' | 'oauth';
 
+const streamIdleTimeoutOptions = ['60s', '90s', '120s', '180s', '300s'];
+
 /** parseSessionLines —— 批量 session 输入解析：支持两种格式混合
  *  1) 每行一个完整的 /api/auth/session JSON（必须是单行 JSON）
  *  2) 每行一个裸 sessionToken（JWE 串）
@@ -192,6 +194,8 @@ export function AccountForm({
   onBatchImport,
   oauth,
 }: AccountFormProps) {
+  const streamIdleTimeoutId = useId();
+  const streamIdleTimeout = credentials.stream_idle_timeout ?? '';
   const [localType, setLocalType] = useState<AccountType | ''>(
     (propType as AccountType) || (mode === 'edit' ? detectType(credentials) : ''),
   );
@@ -542,6 +546,32 @@ export function AccountForm({
           </div>
         </div>
       </div>
+
+      {accountType && !isBatchActive && (
+        <div>
+          <label htmlFor={streamIdleTimeoutId} style={labelStyle}>流式空闲超时</label>
+          <select
+            id={streamIdleTimeoutId}
+            name="stream_idle_timeout"
+            style={inputStyle}
+            value={streamIdleTimeout}
+            onChange={(e) => updateField('stream_idle_timeout', e.target.value)}
+            aria-describedby={`${streamIdleTimeoutId}-hint`}
+          >
+            <option value="">继承插件配置（默认 60 秒）</option>
+            {streamIdleTimeoutOptions.map((value) => (
+              <option key={value} value={value}>{value.slice(0, -1)} 秒</option>
+            ))}
+            {streamIdleTimeout && !streamIdleTimeoutOptions.includes(streamIdleTimeout) && (
+              <option value={streamIdleTimeout}>已有配置：{streamIdleTimeout}</option>
+            )}
+          </select>
+          <div id={`${streamIdleTimeoutId}-hint`} style={{ ...descStyle, marginTop: '0.375rem' }}>
+            限制连续未收到上游数据的时间，不是请求总时长。作用于当前账号的所有流式请求；
+            gpt-5.5 等包含长时间工具调用的账号可先选 120～180 秒。
+          </div>
+        </div>
+      )}
 
       {accountType === 'apikey' && (
         <>
