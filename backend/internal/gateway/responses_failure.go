@@ -260,6 +260,16 @@ func classifyResponsesError(errType, errCode, msg string) *responsesFailureError
 			AnthropicErrorType: "invalid_request_error",
 			Message:            msg,
 		}
+	// 参数校验语义（未知字段/非法枚举值/工具类型没开通）在 in-band SSE 错误里同样成立：
+	// 换账号重放一模一样，不该 failover、更不该记账号故障（2026-09-18 同源缺陷）。
+	case isClientRequestMachineSignal(errCode), isClientRequestMachineSignal(errType),
+		isRequestScopedFailureText(errType, errCode, msg):
+		return &responsesFailureError{
+			Kind:               responsesFailureKindClient,
+			StatusCode:         http.StatusBadRequest,
+			AnthropicErrorType: "invalid_request_error",
+			Message:            msg,
+		}
 	case containsAny(errType, errCode, msg, "invalid_prompt", "invalid_request", "input_too_long", "is not supported", "unsupported", "model_not_found", "model not found", "invalid model", "invalid_model", "does not exist"):
 		return &responsesFailureError{
 			Kind:               responsesFailureKindClient,

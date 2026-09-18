@@ -25,6 +25,16 @@
   `/api/v3` 这类前缀）。所以中继给的专属路由 `https://host/gw/xxx` 必须配成 `https://host/gw/xxx/v1`，
   配成 `https://host/gw/xxx` 会拼出 `/gw/xxx/chat/completions` → 上游 404,
   症状极像「这条路由没开通我们的模型」（假 key 401、真 key 404）。只有域名的 base_url 不受影响。
+- **账号存活判定禁止裸子串**（`errors.go`，2026-09-18 事故）：上游参数校验失败会把**合法值**
+  列进文案（火山 ``expected one of `adaptive`, `enabled`, `disabled` ``），裸
+  `strings.Contains(msg, "disabled")` 于是把一个纯客户端错误判成 `AccountDead`——客户收到
+  误导性 503「当前没有可用的服务账号」，唯一账号还被写上假故障事件、与真抖动共用连击计数器。
+  现在的口径：`stripEchoedLiterals` 先剥掉回显字面量 → `classificationTokens` 切词 →
+  状态词必须挂在账号级主语上（`isDisabledAccountText`）；参数校验语义
+  （`isRequestScopedFailureText`，含 403「无权使用内置工具」）一律 `ClientError`，
+  绝不参与账号存活判定。**新增/修改任何会处罚账号的文案匹配，都要按这套写，并补一条
+  「合法值枚举不得判死」的用例**（`errors_account_liveness_test.go`）。
+  判死的代价是假 503 + 污染监控，不判死的代价只是多试一次——拿不准就别判死。
 - 要用 core 能力（用量、配置等）只能经 `Host.Invoke` / `Host.InvokeStream`。
 - **`plugin.yaml` 由 `make manifest` 生成，不可手改**（模型/路由/账号字段在 Go 代码里声明）。
 - 前端是单 `index.js` bundle，输出到 `web/dist/index.js`，用 `@doudou-start/airgate-theme`。
@@ -179,11 +189,19 @@ function_call/output 配对，比 400 更难查。作用域按账号：凭证 `r
 - `input[].type`：`local_shell_call` `custom_tool_call` `agent_message` `tool_search_call`
   `compaction` `configuration_update` `image_generation_call` `computer_call` `item_reference`
   （支持的有 `message` `function_call` `function_call_output` `reasoning` `web_search_call` `mcp_call`）
-- `tools[].type`：`local_shell` `custom` `file_search` `code_interpreter` `computer_use_preview`
-  `image_generation`，以及 Codex 的 `type:"namespace"` 分组容器
-  （火山只认 `function` `web_search` `image_process` `mcp` `knowledge_search` `doubao_app`）
-- `content[].type`：`output_text` `input_audio`
+- `tools[].type`：`local_shell` `file_search` `code_interpreter` `computer_use_preview`
 - `include[]`：只认 `reasoning.encrypted_content`
+
+**⚠️ 本表按 2026-09-18 逐值实测订正过，别照旧版记忆改代码**：
+- `tools[].type` 的 `custom` 与 Codex 分组容器 `namespace` 实测 **200**（火山原样回显 `tools`），
+  不是 400；`content[].type: output_text` 出现在 `input` 里也实测 **200**（历史被采纳）。
+  旧版清单把这三个记成 400，属**记录错误**。
+- `tools[].type: image_generation` 走不到火山：`request.go` 的 `hasImageGenerationTool`
+  先把它接走了（响应里因此根本没有 `tools` 键）。
+- `tools[].type: mcp` 是 **403**「you do not have access to the built in tool」——
+  这把 key 没开通内置工具，是**每请求的能力问题**，不是账号死亡。
+  `errors.go` 的 `isRequestScopedFailureText` 已把它归 `ClientError`（2026-09-18 修复前
+  被 `case 401, 403 → AccountDead` 判死，客户收到假 503、账号被写假故障事件）。
 
 **UA 豁免通道（辅助，不作为主修法）**：客户端 UA 含 `codex` 时火山转弱校验，
 实测整份 Codex 原始 body 直接 200。我们**已经在透传客户端 UA**（`headers.go` 的
