@@ -83,7 +83,7 @@ func (g *OpenAIGateway) forwardHTTP(ctx context.Context, req *sdk.ForwardRequest
 	_, reqPath := resolveAPIKeyRoute(req)
 	var reqServiceTier string
 	if !strings.HasPrefix(req.Headers.Get("Content-Type"), "multipart/") {
-		req.Body = preprocessRequestBody(req.Body, req.Model, reqPath)
+		req.Body = preprocessRequestBody(req.Body, req.Model, reqPath, req.Account)
 		req.Body = applyForceInstructionsForRequest(req.Body, req.Headers, reqPath)
 		if !isImagesRequest(reqPath) {
 			req.Body = filterDisabledImageGenerationTool(req.Body, req.Headers)
@@ -760,6 +760,16 @@ func (g *OpenAIGateway) forwardAPIKey(ctx context.Context, req *sdk.ForwardReque
 		return g.handleImagesResponse(resp, req.Writer, sseKA, start, req.Model, parsedImages)
 	}
 
+	// 有状态会话：本次响应会被上游保留时，记下它的 response id 交给 core 登记账号绑定，
+	// 下一轮带 previous_response_id 的续聊才钉得回来（见 responses_session.go）。
+	sessionFields := responsesSessionFieldsForAccount(account, req.Body, reqPath)
+	capturedResponseID := ""
+	captureResponseID := func(id string) {
+		if capturedResponseID == "" {
+			capturedResponseID = id
+		}
+	}
+
 	if req.Stream && req.Writer != nil {
 		options := streamResponseOptions{
 			suppressChatUsage: chatStream && !clientWantsChatStreamUsage,
@@ -769,6 +779,9 @@ func (g *OpenAIGateway) forwardAPIKey(ctx context.Context, req *sdk.ForwardReque
 				firstOutputTimeoutForBody(defaultFirstOutputTimeout, len(req.Body)),
 				firstOutputTimeoutForAttempt(defaultFirstOutputTimeout, forwardAttemptFromHeaders(req.Headers)),
 			),
+		}
+		if !sessionFields.storeDisabled {
+			options.captureResponseID = captureResponseID
 		}
 		var outcome sdk.ForwardOutcome
 		var streamErr error
@@ -788,6 +801,9 @@ func (g *OpenAIGateway) forwardAPIKey(ctx context.Context, req *sdk.ForwardReque
 		}
 		attachUpstreamTimings(&outcome, pluginPreMs, upstreamTTFBMs)
 		restoreMappedUsageModel(logger, &outcome, mappedPublicModel)
+		if !sessionFields.storeDisabled && outcome.Kind == sdk.OutcomeSuccess {
+			g.bindResponseAffinity(ctx, req, capturedResponseID)
+		}
 		return outcome, streamErr
 	}
 	outcome, dispatchErr := handleNonStreamResponseWithOptions(resp, req.Writer, start, reqServiceTier, streamResponseOptions{
@@ -796,6 +812,9 @@ func (g *OpenAIGateway) forwardAPIKey(ctx context.Context, req *sdk.ForwardReque
 	})
 	attachUpstreamTimings(&outcome, pluginPreMs, upstreamTTFBMs)
 	restoreMappedUsageModel(logger, &outcome, mappedPublicModel)
+	if !sessionFields.storeDisabled && outcome.Kind == sdk.OutcomeSuccess {
+		g.bindResponseAffinity(ctx, req, responseIDFromResponsesJSON(outcome.Upstream.Body))
+	}
 	return outcome, dispatchErr
 }
 

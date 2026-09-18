@@ -99,6 +99,10 @@ type streamResponseOptions struct {
 	// firstOutputTimeout 首个真实输出的看门狗时限:超时且尚未向客户端写出任何内容时,
 	// 关闭上游连接并判 UpstreamTransient,由 core 换账号重试(<0 表示关闭看门狗)。
 	firstOutputTimeout time.Duration
+	// captureResponseID 非空时,流里出现的第一个 Responses response id 交给它。
+	// 用于登记「这条 response 由哪个账号产出」(会话亲和,见 responses_session.go)——
+	// 流式请求 core 是直通的,只有插件看得见这个 id。
+	captureResponseID func(string)
 }
 
 // defaultFirstOutputTimeout 是流式请求「上游一个真实事件都不产出」的容忍上限。
@@ -266,6 +270,11 @@ func handleStreamResponseWithKeepAliveOptions(logger *slog.Logger, resp *http.Re
 				diagnostics.completionEvent = "[DONE]"
 			} else if data != "" {
 				parseSSEUsage([]byte(data), usage, &toolImageIn, &toolImageOut)
+				if options.captureResponseID != nil {
+					if id := responseIDFromSSEData([]byte(data)); id != "" {
+						options.captureResponseID(id)
+					}
+				}
 				imageGenCounter.AddSSEData([]byte(data))
 				if streamErr = parseSSEFailureEvent([]byte(data)); streamErr != nil {
 					logStreamFailure(logger, streamErr, resp, streamStarted, diagnostics)

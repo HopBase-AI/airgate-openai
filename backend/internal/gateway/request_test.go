@@ -203,7 +203,7 @@ func TestPreprocessRequestBody_PreservesConversationImageDataURLs(t *testing.T) 
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := preprocessRequestBody(tc.body, "gpt-5.4", tc.path)
+			got := preprocessRequestBody(tc.body, "gpt-5.4", tc.path, nil)
 			if gotImage := gjson.GetBytes(got, tc.resultPath).String(); gotImage != imageRef {
 				t.Fatalf("conversation image should stay unchanged, got %.32q", gotImage)
 			}
@@ -214,7 +214,7 @@ func TestPreprocessRequestBody_PreservesConversationImageDataURLs(t *testing.T) 
 func TestPreprocessRequestBodyMapsGLMFP8AliasForUpstream(t *testing.T) {
 	body := []byte(`{"model":"glm-5.2-fp8","messages":[{"role":"user","content":"hi"}],"stream":true}`)
 
-	got := preprocessRequestBody(body, "glm-5.2-fp8", "/v1/chat/completions")
+	got := preprocessRequestBody(body, "glm-5.2-fp8", "/v1/chat/completions", nil)
 
 	if model := gjson.GetBytes(got, "model").String(); model != "glm-5.2" {
 		t.Fatalf("upstream model = %q, want glm-5.2; body=%s", model, got)
@@ -224,7 +224,7 @@ func TestPreprocessRequestBodyMapsGLMFP8AliasForUpstream(t *testing.T) {
 func TestPreprocessRequestBodyKeepsConfiguredDeepSeekModel(t *testing.T) {
 	body := []byte(`{"model":"deepseek-v4-flash-202605","messages":[{"role":"user","content":"hi"}]}`)
 
-	got := preprocessRequestBody(body, "deepseek-v4-flash-202605", "/v1/chat/completions")
+	got := preprocessRequestBody(body, "deepseek-v4-flash-202605", "/v1/chat/completions", nil)
 
 	if model := gjson.GetBytes(got, "model").String(); model != "deepseek-v4-flash-202605" {
 		t.Fatalf("upstream model = %q, want deepseek-v4-flash-202605; body=%s", model, got)
@@ -338,7 +338,7 @@ func TestPreprocessRequestBody_ForcesResponsesStoreFalse(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := preprocessRequestBody(tc.body, "gpt-5.4", "/v1/responses")
+			got := preprocessRequestBody(tc.body, "gpt-5.4", "/v1/responses", nil)
 			if store := gjson.GetBytes(got, "store"); !store.Exists() || store.Bool() {
 				t.Fatalf("store = %v, want false; body=%s", store.Value(), got)
 			}

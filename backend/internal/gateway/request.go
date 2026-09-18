@@ -240,15 +240,18 @@ func upstreamModelID(requestModel string) string {
 // 拿到的 body 格式一致。当前处理步骤：
 //  1. model 同步（body 中的 model 与 core 传入的 model 对齐）
 //  2. data:image 输入保持原样（对齐 Codex，不在网关内重采样用户图片）
-//  3. 剔除客户端 previous_response_id（跨账号接续不可靠，会话接续由网关内部管理）
+//  3. Responses 有状态会话字段按**账号能力**处理（见 responses_session.go）：
+//     上游支持就透传客户端的 previous_response_id / store，不支持才沿用旧行为
+//     （剔 previous_response_id + 强制 store=false）
 //  4. input 规范化（/v1/responses 的 string input → list，messages → input 转换）
-//  5. Responses API 强制禁用上游存储（store=false）
 //
 // 注意：这里**不做** messages 裁剪。历史上曾有「超过 26 条只保留开头 2 条 system +
 // 末尾 24 条」的上下文守卫，会让 agent 长会话每轮静默丢失中间上下文，并把
 // tool_calls/tool 配对切断后交给上游（2026-09-04 GLM 5.3 客户 400 事故）。
 // 上下文长度由客户端与上游权威判定，网关不得替客户改写对话历史。
-func preprocessRequestBody(body []byte, model, reqPath string) []byte {
+//
+// account 用于判定上游能力；为 nil 时按「不支持」处理，与改动前行为一致。
+func preprocessRequestBody(body []byte, model, reqPath string, account *sdk.Account) []byte {
 	if len(body) == 0 {
 		return body
 	}
@@ -273,14 +276,24 @@ func preprocessRequestBody(body []byte, model, reqPath string) []byte {
 
 	result = preserveOpenAIConversationImages(result)
 
-	// 剔除客户端传入的 previous_response_id。
-	// AirGate 在多个上游账号之间做负载均衡，客户端的 previous_response_id
-	// 可能指向另一个账号的 response，上游会返回 "not found"。
-	// 会话接续由网关内部的 session 机制（OAuth sessionState / Anthropic digestChain）管理。
-	result, _ = dropPreviousResponseIDFromJSON(result)
+	// 有状态会话字段按账号能力分流。
+	//
+	// 放行（火山方舟等明确支持的上游）：previous_response_id 与 store 原样透传，
+	// 客户端没传 store 就尊重上游默认；跨账号问题由 core 的会话亲和解决——
+	// 带 previous_response_id 的续聊会被钉回产出它的账号，钉不住时明确报错。
+	//
+	// 不放行（默认，OpenAI 官方以外的各类中继）：保持改动前的行为。这里必须继续剥，
+	// 因为没有绑定就没有钉，透传只会撞上游的 not found。
+	if !responsesSessionPassthroughEnabled(account) {
+		// AirGate 在多个上游账号之间做负载均衡，客户端的 previous_response_id
+		// 可能指向另一个账号的 response，上游会返回 "not found"。
+		result, _ = dropPreviousResponseIDFromJSON(result)
+	}
 
 	result = normalizeResponsesInput(result, reqPath)
-	result = forceResponsesStoreFalse(result, reqPath)
+	if !responsesSessionPassthroughEnabled(account) {
+		result = forceResponsesStoreFalse(result, reqPath)
+	}
 	return result
 }
 

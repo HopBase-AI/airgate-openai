@@ -69,7 +69,7 @@ func TestPreprocessRequestBody_KeepsAllChatMessages(t *testing.T) {
 	}
 	b.WriteString(`]}`)
 
-	processed := preprocessRequestBody([]byte(b.String()), "gpt-4o", "/v1/chat/completions")
+	processed := preprocessRequestBody([]byte(b.String()), "gpt-4o", "/v1/chat/completions", nil)
 	if got := gjson.GetBytes(processed, "messages.#").Int(); got != 120 {
 		t.Fatalf("messages count after preprocess = %d, want 120 (no trimming)", got)
 	}
