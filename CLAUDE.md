@@ -106,6 +106,129 @@ registry 按"不虚构倍率"刻意把阶梯留空，**之后官方出行了却�
    **生产在跑的模型当天就必须有行**；
 3. 阶梯边界补测：阈值 −1 / 恰好等于 / +1 三例，且缓存 token 计入阈值。
 
+## 火山方舟（Volcengine Ark）协议支持面
+
+> 2026-09-17 核。文档出处逐条给在表里；标「实测」的是当天用生产账号 124 直连
+> `https://ark.cn-beijing.volces.com/api/v3` 逐字段打出来的结果。
+> **实测与文档冲突时以实测为准**——方舟文档的字段表并不完整。
+
+### 三条协议，三个独立端点
+
+| 协议 | 端点 | 形制 | 鉴权 | 官方文档 |
+|---|---|---|---|---|
+| 对话 Chat | `https://ark.cn-beijing.volces.com/api/v3/chat/completions` | OpenAI 兼容 Chat Completions | `Authorization: Bearer <ARK_API_KEY>` | [82379/1494384](https://www.volcengine.com/docs/82379/1494384) |
+| Responses | `https://ark.cn-beijing.volces.com/api/v3/responses` | OpenAI Responses API（配套 `GET /responses/{id}`、`GET /responses/{id}/input_items`、`DELETE /responses/{id}`） | 同上 | [82379/1569618](https://www.volcengine.com/docs/82379/1569618)、[82379/1585128](https://www.volcengine.com/docs/82379/1585128) |
+| Messages | `https://ark.cn-beijing.volces.com/api/compatible/v1/messages` | **Anthropic Messages 形制**（`messages`/`system`/`max_tokens`/`stop_sequences`，回 `content`/`stop_reason`/`usage`） | 同上（Claude Code 用 `ANTHROPIC_AUTH_TOKEN`） | [82379/2655179](https://www.volcengine.com/docs/82379/2655179) |
+
+注意路径：Anthropic 兼容层挂在 **`/api/compatible/v1`**，不是 `/api/v3`。
+将来接 Claude 格式客户端不必自己造轮子，但**别把 `/api/v3` 的 base_url 直接拿去打 messages**。
+另有管控面 `https://ark.cn-beijing.volcengineapi.com/?Action=...`，只认 AK/SK 签名，与推理无关。
+计费套餐会换 base_url 前缀（后付费 `/api/v3`、Agent Plan `/api/plan/v3`、Coding Plan `/api/coding/v3`，
+见 [82379/2160841](https://www.volcengine.com/docs/82379/2160841)）——用错前缀不消耗套餐额度、会额外计费。
+
+| 能力 | Chat | Responses | 出处 |
+|---|---|---|---|
+| 流式 SSE | ✅ | ✅ | 1494384 / 2644692 |
+| Function Calling | ✅ | ✅（另有 `web_search` / `mcp` / `knowledge_search` 等内置工具） | 1585128 |
+| 多模态输入 | ✅ | ✅ | 1585128 |
+| 上下文缓存 | 隐式缓存；显式缓存要走独立 Context API | 隐式 + 显式（`caching` / `previous_response_id`） | 1585128 |
+| 有状态会话 | ✗ | ✅（`store` **默认 true**，`expire_at` 默认 3 天、最长 7 天） | 1569618 |
+
+### Responses API：火山**强校验**，未知字段直接 400
+
+模型页《API 参数差异》逐字（[82379/2687970](https://docs.volcengine.com/docs/82379/2687970?lang=zh)，
+JS 渲染页，WebFetch 抓不到，要渲染后取 `window._ROUTER_DATA` 里的 `MDContent`）：
+
+> Responses API 整体兼容性 —— **DeepSeek 官网**：弱校验，对不支持字段全部不校验。
+> **方舟**：强校验，不支持的字段仍然校验。
+> 注：如果 User Agent 里包含 `codex` 字样，也会进入弱校验，但不支持 `store`。
+
+报错文案 `json: unknown field "xxx"` 是 Go `encoding/json` 在 `DisallowUnknownFields()` 下的原生
+文案，且**逐层生效**：顶层、`input[]` 每个元素、`content[]` 每个分片、`tools[]` 每个条目、
+`reasoning` / `text` 子对象各有各的结构体。实测把 `summary` 放到 `message` 元素上照样 400，
+**所以官方文档那份「`input[]` 19 个字段」是跨类型的并集，不能当成单一白名单用。**
+
+**我们的承接方式：`responses_ark_fields.go` 的逐层白名单**（2026-09-17，事故修复）。
+只剥对象里的键，**绝不删数组元素、不改 type、不重排会话历史**——删 `input[]` 元素会切断
+function_call/output 配对，比 400 更难查。作用域按账号：凭证 `responses_field_filter`
+（`auto` 默认 = base_url 命中方舟域名时启用 / `ark` 强制开 / `off` 强制关）。
+**绝不能做成全局**：真正的 OpenAI 上游与 Codex Pro 中继是认这些字段的。
+
+火山**接受**的顶层字段（文档 21 个 + 实测补 4 个）：
+`input` `model` `caching` `context_management` `expire_at` `include` `instructions`
+`max_output_tokens` `max_tool_calls` `metadata` `previous_response_id` `reasoning`
+`service_tier` `store` `stream` `temperature` `text` `thinking` `tool_choice` `tools` `top_p`
+＋ 文档未列但实测接受的 `parallel_tool_calls` `prompt_cache_key` `safety_identifier` `client_metadata`
+（照文档剥掉会误伤：`parallel_tool_calls` 是行为开关，`prompt_cache_key` 影响缓存亲和，
+而缓存命中价只有输入价的 1/50）。
+
+实测会被火山 **400** 的典型来源（Codex 系客户端默认就发）：
+
+| 位置 | 字段 |
+|---|---|
+| 顶层 | `stream_options` `truncation` `user` `background` `logprobs` `top_logprobs` `n` `stop` `frequency_penalty` `presence_penalty` `conversation` `prompt` `access_programs` `codex_output_schema` |
+| `reasoning` | `summary` `generate_summary`（只认 `effort`） |
+| `text` | `verbosity`（只认 `format`） |
+| `input[].message` | `internal_chat_message_metadata_passthrough` `author` `recipient`（认 `type/role/content/id/status/phase/partial`） |
+| `input[].function_call` | **`namespace`** `encrypted_function_args` `execution`（认 `type/id/call_id/name/arguments/status`） |
+| `input[].reasoning` | `effort` `signature`（认 `type/id/summary/content/encrypted_content/status`） |
+| `content[]` 分片 | `cache_control`（Anthropic 风格客户端）`annotations` `image_size` |
+| `tools[]` function 条目 | `namespace`（认 `type/name/description/parameters/strict`） |
+
+**火山不支持、我们有意不改写、会响亮 400 的结构**（改写它们等于替客户猜语义）：
+- `input[].type`：`local_shell_call` `custom_tool_call` `agent_message` `tool_search_call`
+  `compaction` `configuration_update` `image_generation_call` `computer_call` `item_reference`
+  （支持的有 `message` `function_call` `function_call_output` `reasoning` `web_search_call` `mcp_call`）
+- `tools[].type`：`local_shell` `custom` `file_search` `code_interpreter` `computer_use_preview`
+  `image_generation`，以及 Codex 的 `type:"namespace"` 分组容器
+  （火山只认 `function` `web_search` `image_process` `mcp` `knowledge_search` `doubao_app`）
+- `content[].type`：`output_text` `input_audio`
+- `include[]`：只认 `reasoning.encrypted_content`
+
+**UA 豁免通道（辅助，不作为主修法）**：客户端 UA 含 `codex` 时火山转弱校验，
+实测整份 Codex 原始 body 直接 200。我们**已经在透传客户端 UA**（`headers.go` 的
+`openaiAllowedHeaders` 含 `user-agent`，只有 sub2api 账号例外），所以真正的 Codex CLI
+本来就走得通。但 2026-09-17 那位受影响客户落库的 UA 是 `Go-http-client/2.0`——
+**豁免拿不到，白名单才是唯一可靠修法**。不要为了骗豁免去伪造 UA。
+
+### DeepSeek-V4.1-Flash 在方舟上的行为差异
+
+模型页《模型能力支持差异》《API 参数差异》（同 2687970，左列 DeepSeek 官网 / 右列方舟）：
+
+| 场景 | DeepSeek 官网 | **方舟（我们的上游）** |
+|---|---|---|
+| `max_tokens` | 超出长度**报错** | 超出**不报错**；思维链超出会**截断思考** |
+| Chat 默认 max_tokens | 非思考 8K / 思考 64K（`reasoning_effort=max` 128K） | **默认 128K** |
+| `tool_choice: required` | 思考模式下**不支持，报错** | 思考模式下**支持**（实测 200） |
+| `role: developer` | 不支持 | 支持 |
+| 图片理解 | 单图 ≤32MB | 单图 **≤50MB** |
+| 视频理解 | 不支持 | 支持，单个视频 ≤50MB，支持 Files Id |
+| 结构化输出 json_schema | 不支持 | 支持 |
+| 隐式缓存 | 支持 | 支持，**缓存最少 256 token** |
+| 显式缓存 | 不支持 | 支持 |
+
+- **`max_tokens` 不报错 + 思维链计入预算**，正好解释验收里「`max_tokens=24` 返回 200 但
+  `content` 为空、`finish_reason=length`」——预算全被推理吃掉了。对客文档必须写这条。
+- **前缀续写**：Chat 用 `messages` 最后一条 assistant + `prefix:true`；
+  Responses 用 `input` 最后一条 assistant + `partial:true`（不设不报错，只是不开启）。
+- 峰谷窗口官方逐字（[82379/1544106](https://www.volcengine.com/docs/82379/1544106)）：
+  **北京时间周一至周五 09:00–12:00、14:00–18:00 为高峰，其余为空闲**；
+  刊例价空闲 ¥1.00/¥0.02/¥4.00（输入/缓存命中/输出，每百万 token），高峰 ¥2.00/¥0.04/¥8.00
+  ——与我方覆盖层配置逐项对上。
+
+### 与 `store` / `caching` 的取舍（结论，未改默认）
+
+- 火山 `store` **默认 true**，会把 response 存 3 天（`expire_at` 最长 7 天）。
+  我们在 `request.go` 的 `forceResponsesStoreFalse` 里**一直强制 `store:false`**，
+  客户数据不落上游存储——**保持现状，不要改**。
+- 代价：火山的**显式前缀缓存 `caching` 要求 `store=true`**（实测
+  `store should be true when enable caching`），所以我们目前拿不到显式缓存，
+  只能吃隐式缓存（≥256 token 自动命中，验收已实证命中率 97.8%）。
+  要不要为了显式缓存放开 `store`，是数据留存 vs 成本的产品决定，不是技术决定。
+- `thinking`（`enabled`/`disabled`/`auto`）与 `service_tier`（`fast`/`auto`/`default`/`flex`）
+  是火山扩展，实测都接受。`thinking` 可做「思考开关」对客能力，`service_tier=flex` 能换低价
+  但强制 `store=false`——两者都**待拍板**，本轮未接。
+
 ## 混合现状（过渡态）
 
 本仓当前混合了网关 + provider + UI 三层职责（目标应拆为独立组件）：

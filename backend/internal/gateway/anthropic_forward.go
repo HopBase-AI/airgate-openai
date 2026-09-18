@@ -446,6 +446,13 @@ func (g *OpenAIGateway) buildAnthropicUpstreamRequest(
 		targetURL = ChatGPTSSEURL
 	} else {
 		targetURL = buildAPIKeyURL(account, "/v1/responses")
+		// Anthropic → Responses 桥接自己拼 body，走不到 forwardAPIKey 那道裁剪，
+		// 但它对齐的是 Codex CLI 的字段集：`reasoning.summary` 与 `text.verbosity`
+		// （anthropic_convert.go 的固定参数）恰好都是火山方舟不认的字段。
+		// 不在这里同样裁一刀，Claude Code 这类 Anthropic 形制客户端打到方舟账号
+		// 会撞上与 /v1/responses 完全相同的 400 → 负毛利兜底。
+		// OAuth 分支绝不能裁：那是 ChatGPT 自家后端，认这些字段。
+		responsesBody, _ = sanitizeResponsesBodyForAccount(account, responsesBody, "/v1/responses")
 	}
 
 	upstreamReq, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(responsesBody))
