@@ -601,6 +601,11 @@ gateway:
           type: text
           required: false
           placeholder: https://api.openai.com
+        - key: stream_idle_timeout
+          label: 流式空闲超时
+          type: text
+          required: false
+          placeholder: 可选；正数时长，如 120s 或 180s；留空继承插件配置（默认 60s）
         - key: gpt_image_2_upstream_model
           label: GPT Image 2 上游模型 ID
           type: text
@@ -655,3 +660,8 @@ gateway:
           type: text
           required: false
           placeholder: 授权后自动填充
+        - key: stream_idle_timeout
+          label: 流式空闲超时
+          type: text
+          required: false
+          placeholder: 可选；正数时长，如 120s 或 180s；留空继承插件配置（默认 60s）
