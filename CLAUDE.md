@@ -132,7 +132,7 @@ registry 按"不虚构倍率"刻意把阶梯留空，**之后官方出行了却�
 | Function Calling | ✅ | ✅（另有 `web_search` / `mcp` / `knowledge_search` 等内置工具） | 1585128 |
 | 多模态输入 | ✅ | ✅ | 1585128 |
 | 上下文缓存 | 隐式缓存；显式缓存要走独立 Context API | 隐式 + 显式（`caching` / `previous_response_id`） | 1585128 |
-| 有状态会话 | ✗ | ✅（`store` **默认 true**，`expire_at` 默认 3 天、最长 7 天） | 1569618 |
+| 有状态会话 | ✗ | ✅（`store` **默认 true**，`expire_at` 默认 3 天、最长 7 天）——已放行，见下 | 1569618 |
 
 ### Responses API：火山**强校验**，未知字段直接 400
 
@@ -216,18 +216,36 @@ function_call/output 配对，比 400 更难查。作用域按账号：凭证 `r
   刊例价空闲 ¥1.00/¥0.02/¥4.00（输入/缓存命中/输出，每百万 token），高峰 ¥2.00/¥0.04/¥8.00
   ——与我方覆盖层配置逐项对上。
 
-### 与 `store` / `caching` 的取舍（结论，未改默认）
+### 有状态会话：`previous_response_id` / `store`（2026-09-18 已放行）
 
-- 火山 `store` **默认 true**，会把 response 存 3 天（`expire_at` 最长 7 天）。
-  我们在 `request.go` 的 `forceResponsesStoreFalse` 里**一直强制 `store:false`**，
-  客户数据不落上游存储——**保持现状，不要改**。
-- 代价：火山的**显式前缀缓存 `caching` 要求 `store=true`**（实测
-  `store should be true when enable caching`），所以我们目前拿不到显式缓存，
-  只能吃隐式缓存（≥256 token 自动命中，验收已实证命中率 97.8%）。
-  要不要为了显式缓存放开 `store`，是数据留存 vs 成本的产品决定，不是技术决定。
+**产品决定：上游支持的能力就支持，不在网关里替客户阉割。** 数据留存的取舍已拍板接受。
+
+改动前 `request.go` 无条件做两件事：剔掉客户端的 `previous_response_id`、强制 `store=false`。
+后果是客户发了 `previous_response_id` 拿到 200 却**完全没有记忆**、没有任何提示——
+最难自查的一类故障。原因（response id 属于某个账号、换号 not found）成立，但正确解法是
+**把会话钉回原账号**，不是把能力砍掉。
+
+- **放行范围按账号**（`responses_session.go`，与 `responses_field_filter` 同构）：
+  凭证 `responses_session_passthrough`，`auto`（默认）= `isVolcengineArkAccount` 命中方舟域名时放行，
+  `on` 强制开（其它已验证支持的上游），`off` 强制关。**其余账号保持改动前行为**——
+  各类中继对这两个字段行为不一，全放开是拿别的通道的稳定性去赌。
+- **放行后**：`previous_response_id` 原样透传；`store` 跟随客户端，客户端没传就**尊重上游默认**
+  （火山为 true，存 3 天、`expire_at` 最长 7 天）。顺带拿回**显式前缀缓存**：
+  火山的 `caching` 要求 `store=true`（实测 `store should be true when enable caching`），
+  而缓存命中价只有输入价的 1/50。
+- **跨账号问题交给 core 的会话亲和**（core `internal/plugin/session_affinity.go`）：
+  插件拿到上游 response id 后经 Host `scheduler.bind_response_account` 登记
+  「这条 response 由哪个账号产出」（复用 core 的 StickySession 存储，只加 `resp:` 命名空间）；
+  下一轮带 `previous_response_id` 的请求被 core 收敛到那一个账号，
+  **钉不住就明确 503 报错（`gw.session_account_unavailable`，五语）让客户重开会话，绝不静默换号**——
+  「200 但丢了上下文」比报错糟糕得多。
+  登记只在响应会被上游留存时做（客户端显式 `store=false` 就不登记），失败只记日志不影响本次响应。
+- ⚠️ 改这里必须同时想清楚**绑定写入侧与查询侧的 key 是否同源**：写进一个查不到的 key，
+  就会退化回「静默丢上下文」，正是本次要根治的问题。core 侧因此按账号自己的 platform 写绑定，
+  不信插件传的值。
 - `thinking`（`enabled`/`disabled`/`auto`）与 `service_tier`（`fast`/`auto`/`default`/`flex`）
   是火山扩展，实测都接受。`thinking` 可做「思考开关」对客能力，`service_tier=flex` 能换低价
-  但强制 `store=false`——两者都**待拍板**，本轮未接。
+  但强制 `store=false`（与有状态会话互斥）——两者都**待拍板**，本轮未接。
 
 ## 混合现状（过渡态）
 

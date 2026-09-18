@@ -26,6 +26,10 @@ const (
 	hostMethodAssetsGetBytes = "assets.get_bytes"
 	hostMethodModelsCatalog  = "models.catalog"
 	hostMethodModelsRefresh  = "models.refresh"
+
+	// hostMethodSchedulerBindResponse 登记「本次 Responses 响应由哪个账号产出」，
+	// 供带 previous_response_id 的续聊被 core 钉回同一账号（见 responses_session.go）。
+	hostMethodSchedulerBindResponse = "scheduler.bind_response_account"
 )
 
 type hostForwardResponse struct {
