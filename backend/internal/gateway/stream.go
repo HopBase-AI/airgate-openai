@@ -185,7 +185,15 @@ func handleStreamResponseWithKeepAliveOptions(logger *slog.Logger, resp *http.Re
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
 	passCodexRateLimitHeaders(resp.Header, w.Header())
-	w = &synchronizedResponseWriter{ResponseWriter: w}
+	w = newSynchronizedResponseWriter(w)
+	// 心跳持续整条流，不再在首帧写出后停止。
+	//
+	// 原先出字即停，是因为心跳帧可能插进一个事件的两行之间把事件劈开；现在
+	// synchronizedResponseWriter 记录事件边界、心跳只在边界插入，这个顾虑没有了。
+	// 必须持续的理由：上游宣布工具调用后会憋几十秒才吐参数（实测最长 42.96s），
+	// 这期间客户端一个字节都收不到，很可能自己先超时断开——那样把读空闲上限放宽到
+	// 150s 就白放了，失败只是从 stream_aborted 变成 499。
+	// 附带收益：心跳写失败即客户端已断，能比"等下一次上游数据"更早发现并关掉上游连接。
 	keepAlive := startSSECommentKeepAlive(w, keepAliveInterval, func(error) {
 		_ = resp.Body.Close()
 	})
@@ -318,9 +326,6 @@ func handleStreamResponseWithKeepAliveOptions(logger *slog.Logger, resp *http.Re
 		}
 
 		if !ok || data == "" || data == "[DONE]" {
-			if !streamStarted && diagnostics.hasOutput() {
-				keepAlive.Stop()
-			}
 			if err := writeOrBufferSSELine(w, resp.StatusCode, lineForClient, &pending, &streamStarted, diagnostics.hasOutput()); err != nil {
 				streamErr = newDownstreamWriteError(fmt.Errorf("failed to write SSE to client: %w", err))
 				clientWriteFailed = true
@@ -341,9 +346,6 @@ func handleStreamResponseWithKeepAliveOptions(logger *slog.Logger, resp *http.Re
 		if dropForClient {
 			suppressUsageDelimiter = true
 			continue
-		}
-		if !streamStarted && diagnostics.hasOutput() {
-			keepAlive.Stop()
 		}
 		if err := writeOrBufferSSELine(w, resp.StatusCode, lineForClient, &pending, &streamStarted, diagnostics.hasOutput()); err != nil {
 			streamErr = newDownstreamWriteError(fmt.Errorf("failed to write SSE to client: %w", err))

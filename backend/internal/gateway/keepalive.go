@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -33,9 +34,47 @@ type ssePingKeepAlive struct {
 // synchronizedResponseWriter serializes heartbeat and upstream SSE writes.
 // Plugin response writers are backed by a gRPC stream and are not safe for
 // concurrent Send calls.
+//
+// 它还记录「流当前是否停在 SSE 事件边界」。这一点是心跳能否在出字后继续发的前提：
+// 上游的一个事件由 writeOrBufferSSELine 分三次写出（"event: x" / "data: y" / 空行），
+// 心跳帧若插在中间，客户端会把半个事件当成一个没有 data 的事件丢弃、再把剩下的
+// data 行当成无类型事件——整条流就坏了。所以心跳只在边界处插入。
 type synchronizedResponseWriter struct {
 	http.ResponseWriter
 	mu sync.Mutex
+	// atEventBoundary 上一次写出的内容是否以空行收尾。初始 true：还没写过任何字节时，
+	// 流的开头本来就是合法的注释插入点。
+	atEventBoundary bool
+}
+
+// newSynchronizedResponseWriter 包装 w 并把边界状态初始化为「可插入」。
+func newSynchronizedResponseWriter(w http.ResponseWriter) *synchronizedResponseWriter {
+	return &synchronizedResponseWriter{ResponseWriter: w, atEventBoundary: true}
+}
+
+// endsAtEventBoundary 判断这次写出是否让流停在事件边界。
+// 逐行写时事件末尾的空行是单个 "\n"；首帧由 pending 缓冲一次性写出，以 "\n\n" 收尾。
+func endsAtEventBoundary(data []byte) bool {
+	return bytes.Equal(data, []byte("\n")) || bytes.HasSuffix(data, []byte("\n\n"))
+}
+
+// WriteAtEventBoundary 仅当流正停在事件边界时写入 payload。
+// 返回 false 表示这一拍跳过（上游正好在写一个事件的中间），下一拍再试。
+func (w *synchronizedResponseWriter) WriteAtEventBoundary(payload []byte) (bool, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if !w.atEventBoundary {
+		return false, nil
+	}
+	n, err := w.ResponseWriter.Write(payload)
+	if err == nil && n != len(payload) {
+		err = io.ErrShortWrite
+	}
+	if err != nil {
+		return false, err
+	}
+	// 心跳帧自身以空行收尾，写完仍停在边界。
+	return true, nil
 }
 
 func (w *synchronizedResponseWriter) WriteHeader(statusCode int) {
@@ -47,7 +86,11 @@ func (w *synchronizedResponseWriter) WriteHeader(statusCode int) {
 func (w *synchronizedResponseWriter) Write(data []byte) (int, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	return w.ResponseWriter.Write(data)
+	n, err := w.ResponseWriter.Write(data)
+	if err == nil {
+		w.atEventBoundary = endsAtEventBoundary(data)
+	}
+	return n, err
 }
 
 func (w *synchronizedResponseWriter) Flush() {
@@ -95,11 +138,14 @@ func (ka *sseCommentKeepAlive) run() {
 		case <-ka.stop:
 			return
 		case <-ticker.C:
-			if err := writeResponsePayload(ka.w, []byte(responseStreamKeepAliveComment)); err != nil {
+			written, err := writeKeepAliveAtBoundary(ka.w, []byte(responseStreamKeepAliveComment))
+			if err != nil {
 				ka.setError(newDownstreamWriteError(err))
 				return
 			}
-			flushResponseWriter(ka.w)
+			if written {
+				flushResponseWriter(ka.w)
+			}
 		}
 	}
 }
@@ -224,6 +270,18 @@ func (ka *ssePingKeepAlive) setError(err error) {
 	if onError != nil {
 		onError(err)
 	}
+}
+
+// writeKeepAliveAtBoundary 把心跳帧写到事件边界上。未经 synchronizedResponseWriter
+// 包装的 writer（图片路径等）没有边界信息，维持原先的直接写入行为。
+func writeKeepAliveAtBoundary(w http.ResponseWriter, payload []byte) (bool, error) {
+	if sw, ok := w.(*synchronizedResponseWriter); ok {
+		return sw.WriteAtEventBoundary(payload)
+	}
+	if err := writeResponsePayload(w, payload); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func writeResponsePayload(w http.ResponseWriter, payload []byte) error {
