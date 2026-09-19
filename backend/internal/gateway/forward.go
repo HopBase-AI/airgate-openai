@@ -1432,7 +1432,19 @@ func (g *OpenAIGateway) buildHTTPClient(account *sdk.Account) *http.Client {
 
 const (
 	defaultFirstByteTimeout  = 60 * time.Second
-	defaultStreamIdleTimeout = 60 * time.Second
+	// defaultStreamIdleTimeout 流式读空闲上限。
+	//
+	// 取值依据（2026-09-19 生产实测，Codex 主力上游 gpt-5.5 + apply_patch 场景）：
+	// 上游宣布 custom_tool_call 之后要先把整个补丁文本憋出来才开始吐参数，实测这段
+	// 静默最长 42.96s（17 个样本，最大值），期间连保活帧都没有。原先的 60s 只留 17s
+	// 余量，补丁再大一点就撞线——账号 90 因此产生 1.03% 的 stream_aborted，其中 53%
+	// 的耗时挤在 58~95s 这一桶，紧贴守卫线；改配 150s 后同账号失败率降到 0.09%，
+	// 且残留失败的耗时全部 < 150s（即不再是守卫掐的）。
+	//
+	// 150s ≈ 实测最大静默的 3.5 倍。放宽的代价是「上游真死」时多占 90s 并发槽位，
+	// 生产量级是每天几十次，可接受；而上游整体宕机通常连首字节都来不了，走的是
+	// 另一道独立的 defaultFirstOutputTimeout(30s) 看门狗，不受本值影响。
+	defaultStreamIdleTimeout = 150 * time.Second
 )
 
 // firstByteTimeout 流式等首响应头上限（可经 config first_byte_timeout 覆盖）。

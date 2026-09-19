@@ -70,6 +70,12 @@ func BuildPluginInfo() sdk.PluginInfo {
 					{Key: imagesAsyncCredential, Label: "图像异步任务模式", Type: "text", Required: false, Placeholder: "可选；填 true 时图像请求走 X-Async 提交 + 任务轮询（MiniMax canvas-20 契约）"},
 					{Key: geminiImageProtocolCredential, Label: "Gemini 生图协议", Type: "text", Required: false, Placeholder: "默认 chat_completions；纯 Images API 上游填 images_api"},
 					{Key: chatModelMapCredential, Label: "对话模型 ID 映射", Type: "text", Required: false, Placeholder: `可选；JSON 对象，公开模型名→该上游真实 ID，例如 {"deepseek-v4-pro-202606":"deepseek-v4-pro-ga-260813"}`},
+					// 三个守卫时限：留空即用插件默认值，只有确知该上游行为异常时才按账号覆盖。
+					// 写法是 Go duration（"150s"、"3m"），**必须带单位**——裸数字解析失败会被
+					// 静默忽略并回落默认值，看不出报错（2026-09-19 排查时确认过这个坑）。
+					{Key: "stream_idle_timeout", Label: "流式读空闲上限", Type: "text", Required: false, Placeholder: `留空=默认 150s。流开始后连续多久没有任何数据就判定上游卡死并中止。调小=更快失败，但会误杀"憋大段工具参数"的慢上游；调大=更能容忍慢上游，但真卡死时占用并发槽位更久`},
+					{Key: "first_byte_timeout", Label: "响应头等待上限", Type: "text", Required: false, Placeholder: "留空=默认 60s。等上游返回 HTTP 响应头的上限，超时即换账号重试。大上下文账号可放宽到 180s"},
+					{Key: "hedge_after", Label: "对冲换号阈值", Type: "text", Required: false, Placeholder: "留空=不对冲。首字节迟迟不来时并行向另一个账号发起同一请求，先返回者胜；只在首字前生效，已出内容不对冲"},
 				},
 			},
 			{
@@ -81,6 +87,10 @@ func BuildPluginInfo() sdk.PluginInfo {
 					{Key: "refresh_token", Label: "Refresh Token", Type: "password", Required: false, Placeholder: "授权后自动填充"},
 					{Key: "session_token", Label: "Session Token (JWE)", Type: "password", Required: false, Placeholder: "Session 导入后自动填充"},
 					{Key: "chatgpt_account_id", Label: "ChatGPT Account ID", Type: "text", Required: false, Placeholder: "授权后自动填充", EditDisabled: true},
+					// 与 apikey 类型同义，见上方说明；同样留空即用默认值、必须带单位。
+					{Key: "stream_idle_timeout", Label: "流式读空闲上限", Type: "text", Required: false, Placeholder: "留空=默认 150s。流开始后连续多久没有任何数据就判定上游卡死并中止"},
+					{Key: "first_byte_timeout", Label: "响应头等待上限", Type: "text", Required: false, Placeholder: "留空=默认 60s。等上游返回 HTTP 响应头的上限，超时即换账号重试"},
+					{Key: "hedge_after", Label: "对冲换号阈值", Type: "text", Required: false, Placeholder: "留空=不对冲。首字节迟迟不来时并行向另一个账号发起同一请求，先返回者胜"},
 				},
 			},
 		},

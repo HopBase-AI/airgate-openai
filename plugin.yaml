@@ -631,6 +631,21 @@ gateway:
           type: text
           required: false
           placeholder: 可选；JSON 对象，公开模型名→该上游真实 ID，例如 {"deepseek-v4-pro-202606":"deepseek-v4-pro-ga-260813"}
+        - key: stream_idle_timeout
+          label: 流式读空闲上限
+          type: text
+          required: false
+          placeholder: 留空=默认 150s。流开始后连续多久没有任何数据就判定上游卡死并中止。调小=更快失败，但会误杀"憋大段工具参数"的慢上游；调大=更能容忍慢上游，但真卡死时占用并发槽位更久
+        - key: first_byte_timeout
+          label: 响应头等待上限
+          type: text
+          required: false
+          placeholder: 留空=默认 60s。等上游返回 HTTP 响应头的上限，超时即换账号重试。大上下文账号可放宽到 180s
+        - key: hedge_after
+          label: 对冲换号阈值
+          type: text
+          required: false
+          placeholder: 留空=不对冲。首字节迟迟不来时并行向另一个账号发起同一请求，先返回者胜；只在首字前生效，已出内容不对冲
     - key: oauth
       label: OAuth 登录
       description: 通过浏览器授权登录 ChatGPT 账号
@@ -655,3 +670,18 @@ gateway:
           type: text
           required: false
           placeholder: 授权后自动填充
+        - key: stream_idle_timeout
+          label: 流式读空闲上限
+          type: text
+          required: false
+          placeholder: 留空=默认 150s。流开始后连续多久没有任何数据就判定上游卡死并中止
+        - key: first_byte_timeout
+          label: 响应头等待上限
+          type: text
+          required: false
+          placeholder: 留空=默认 60s。等上游返回 HTTP 响应头的上限，超时即换账号重试
+        - key: hedge_after
+          label: 对冲换号阈值
+          type: text
+          required: false
+          placeholder: 留空=不对冲。首字节迟迟不来时并行向另一个账号发起同一请求，先返回者胜
